@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SDX IWP Helper
 // @namespace    https://burnsmcd.com
-// @version      0.4.0
+// @version      0.4.1
 // @description  Flag superseded drawings, highlight affected work packages, and create stamped drawing ZIPs.
 // @match        https://*.intergraphsmartcloud.com/*
 // @grant        none
@@ -275,8 +275,9 @@
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body)
     });
-    const count = Number(data && data.TotalCount);
-    if (!data || data.RequestSuccessful !== true || data.Status !== 'OK' || !Number.isSafeInteger(count) || count < 0) {
+    const count = data && data.TotalCount;
+    if (!data || data.RequestSuccessful !== true || data.Status !== 'OK' ||
+        typeof count !== 'number' || !Number.isSafeInteger(count) || count < 0) {
       throw new Error(`SDx did not return a valid Superseded Documents count for ${name}.`);
     }
     const result = {
@@ -461,7 +462,7 @@
       throw new Error(`WARNING: Could not verify SDx's Superseded Documents count for ${wp}: ${error && error.message || error}. No drawings were stamped or downloaded.`);
     }
     if (superseded.count) {
-      throw new Error(`WARNING: ${wp} has ${superseded.count} superseded drawing${superseded.count === 1 ? '' : 's'}${superseded.names.length ? ` (${superseded.names.slice(0, 5).join(', ')}${superseded.names.length > 5 ? ', …' : ''})` : ''}. No ZIP was created.`);
+      throw new Error(`WARNING: ${wp} has ${superseded.count} superseded document${superseded.count === 1 ? '' : 's'}${superseded.names.length ? ` (${superseded.names.slice(0, 5).join(', ')}${superseded.names.length > 5 ? ', …' : ''})` : ''}. No ZIP was created.`);
     }
     const rows = await listPackageDocuments(wp, token, config);
     if (!rows.length) {
