@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         SDX IWP Helper
 // @namespace    https://burnsmcd.com
-// @version      0.5.2
-// @description  Flag superseded drawings, highlight affected work packages, and create stamped drawing ZIPs.
+// @version      0.6.0
+// @description  Stamp drawing ZIPs, flag superseded revisions, and update work package document associations.
 // @match        https://*.intergraphsmartcloud.com/*
 // @grant        none
 // @require      https://cdnjs.cloudflare.com/ajax/libs/pdf-lib/1.17.1/pdf-lib.min.js
@@ -18,9 +18,10 @@
   window.__sdxWpStampedDrawingsLoaded = true;
   try { if (window.self !== window.top) return; } catch (_) { return; }
 
-  const BUTTON_ID = 'sdx-wp-stamped-zip-button';
+  const BUTTON_ID = 'sdx-iwp-tools-button';
   const TOOLBAR_ID = 'sdx-iwp-helper-toolbar';
   const MENU_ID = 'sdx-iwp-helper-menu';
+  const DOWNLOAD_DIALOG_ID = 'sdx-iwp-download-dialog';
   const PANEL_ID = 'sdx-wp-stamped-zip-panel';
   const SETTINGS_KEY = 'sdx-iwp-helper-settings-v1';
   const CHECKBOX_SELECTOR = 'input[type="checkbox"].mdc-checkbox__native-control';
@@ -42,7 +43,6 @@
   };
   const statuses = ['planned', 'active', 'executed'];
   const settings = loadSettings();
-  let supersededMode = 'block';
 
   const clean = value => String(value == null ? '' : value).replace(/\s+/g, ' ').trim();
   const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -145,6 +145,16 @@
 
   function onWorkPackageResultsPage() {
     return Boolean(currentEntityType() && /^#\/results(?:;|\/|$)/.test(location.hash || ''));
+  }
+
+  function currentConfigKey() {
+    const fromQuery = currentEntityType()?.config?.key;
+    if (fromQuery) return fromQuery;
+    try {
+      const match = /;config=([^;/?]+)/.exec(location.hash || '');
+      const values = match && JSON.parse(decodeURIComponent(match[1]));
+      return Array.isArray(values) && values.length === 1 ? String(values[0]) : null;
+    } catch (_) { return null; }
   }
 
   function getJQueryData(element, key) {
@@ -376,6 +386,209 @@
     return [...selected.values()];
   }
 
+  function detailWorkPackage() {
+    const match = /(?:\/detail\/|\/infomap-viewer;obid=)([^;?]+)/.exec(location.hash || '');
+    const name = clean(document.querySelector('header.split-panel-header__title')?.textContent);
+    if (!match || !name) return null;
+    return { id: decodeURIComponent(match[1]), name, config: currentConfigKey() };
+  }
+
+  function targetWorkPackages() {
+    return onWorkPackageResultsPage() ? selectedWorkPackages() : [detailWorkPackage()].filter(Boolean);
+  }
+
+  async function waitForUi(check, description, timeout = 20000) {
+    const until = Date.now() + timeout;
+    while (Date.now() < until) {
+      const result = check();
+      if (result) return result;
+      await sleep(150);
+    }
+    throw new Error(`Timed out waiting for SDx ${description}. No update was saved.`);
+  }
+
+  function clickUi(element, description) {
+    if (!element) throw new Error(`Could not find SDx ${description}. No update was saved.`);
+    if (typeof element.click === 'function') element.click();
+    else element.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
+  }
+
+  function setUiInput(input, value) {
+    if (!input) throw new Error('Could not find the SDx document revision search field. No update was saved.');
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(input, value);
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    input.dispatchEvent(new Event('change', { bubbles: true }));
+  }
+
+  function wizardRows(wizard) {
+    return [...wizard.querySelectorAll('.related-items-panel tr[role="row"][data-kendo-grid-item-index]')];
+  }
+
+  function wizardCell(row, index) {
+    return clean(row.querySelector(`td[data-kendo-grid-column-index="${index}"]`)?.textContent);
+  }
+
+  function wizardButton(wizard, label) {
+    return [...wizard.querySelectorAll('button')].find(button => clean(button.textContent).toLowerCase() === label.toLowerCase());
+  }
+
+  function revisionChooser() {
+    return [...document.querySelectorAll('[role="dialog"]')].find(dialog =>
+      /Results\s*:\s*Document Revisions/i.test(dialog.querySelector('h1')?.textContent || ''));
+  }
+
+  async function discardWizard() {
+    const chooser = revisionChooser();
+    if (chooser) {
+      const cancel = [...chooser.querySelectorAll('button')].find(button => clean(button.textContent) === 'Cancel');
+      if (cancel) clickUi(cancel, 'revision results Cancel button');
+      await waitForUi(() => !revisionChooser(), 'revision chooser to close', 5000).catch(() => {});
+    }
+    const wizard = document.querySelector('sda-edit-obj-modal-view');
+    if (!wizard) return;
+    clickUi(wizardButton(wizard, 'Cancel'), 'Update form Cancel button');
+    const yes = await waitForUi(() => [...document.querySelectorAll('button')]
+      .find(button => clean(button.textContent) === 'Yes' && button.getBoundingClientRect().width > 0),
+    'discard confirmation', 5000).catch(() => null);
+    if (yes) clickUi(yes, 'discard confirmation');
+  }
+
+  async function openUpdateWizard(wp) {
+    if (onWorkPackageResultsPage()) {
+      const selected = [...document.querySelectorAll(CHECKBOX_SELECTOR)].find(checkbox => {
+        const row = checkbox.closest('tr[data-uid]');
+        return checkbox.checked && row && workPackageNameFromRow(row) === wp.name;
+      });
+      const row = selected?.closest('tr[data-uid]');
+      const grid = row?.closest('.k-grid');
+      const twin = grid && row?.dataset.uid && [...grid.querySelectorAll('.k-grid-content-locked tr[data-uid]')]
+        .find(candidate => candidate.dataset.uid === row.dataset.uid);
+      const link = (row?.querySelector('td[id^="locked_datacell_"] a') || twin?.querySelector('td[id^="locked_datacell_"] a'));
+      clickUi(link, `${wp.name} detail link`);
+      await waitForUi(() => detailWorkPackage()?.name === wp.name, `${wp.name} detail page`);
+    }
+    const visibleActionIcon = () => [...document.querySelectorAll('image.main-menu-icon')]
+      .find(icon => icon.querySelector('title')?.textContent === 'Actions' && icon.getBoundingClientRect().width > 0);
+    if (!visibleActionIcon()) {
+      clickUi(document.querySelector('[title="Show Info Map"]'), 'Info Map tab');
+    }
+    const findUpdateAction = () => [...document.querySelectorAll('mat-tree-node')]
+      .find(node => clean(node.textContent) === 'Update…' || clean(node.textContent) === 'Update...');
+    if (!findUpdateAction()) {
+      const actionIcon = await waitForUi(visibleActionIcon, 'work package Actions icon');
+      clickUi(actionIcon, 'work package Actions icon');
+    }
+    const updateAction = await waitForUi(findUpdateAction, 'Update action');
+    clickUi(updateAction, 'Update action');
+    return waitForUi(() => {
+      const wizard = document.querySelector('sda-edit-obj-modal-view');
+      return wizard?.querySelector('input[placeholder="Search Document Revisions"]') ? wizard : null;
+    }, 'Update form');
+  }
+
+  async function addCurrentRevision(wizard, name) {
+    const input = wizard.querySelector('input[placeholder="Search Document Revisions"]');
+    setUiInput(input, name);
+    const search = input.closest('.search-query')?.querySelector('.search-query__submit button');
+    clickUi(search, `revision search for ${name}`);
+    const chooser = await waitForUi(revisionChooser, `revision results for ${name}`);
+    await waitForUi(() => chooser.querySelectorAll('tr[role="row"][data-kendo-grid-item-index]').length > 0,
+      `revision results for ${name}`);
+    const matches = [...chooser.querySelectorAll('tr[role="row"][data-kendo-grid-item-index]')]
+      .filter(row => wizardCell(row, 1) === name && /^current$/i.test(wizardCell(row, 6)));
+    if (matches.length !== 1) {
+      throw new Error(`${name}: SDx returned ${matches.length} current revision matches. The update was canceled.`);
+    }
+    const checkbox = matches[0].querySelector('input[type="checkbox"]');
+    if (!checkbox || checkbox.disabled) throw new Error(`${name}: current revision cannot be selected. The update was canceled.`);
+    if (!checkbox.checked) clickUi(checkbox, `${name} current revision checkbox`);
+    const add = [...chooser.querySelectorAll('button')].find(button => clean(button.textContent).toUpperCase() === 'ADD');
+    await waitForUi(() => add && !add.disabled, `ADD button for ${name}`);
+    clickUi(add, `ADD button for ${name}`);
+    await waitForUi(() => !revisionChooser(), 'revision chooser to close');
+    await waitForUi(() => wizardRows(wizard).some(row => wizardCell(row, 2) === name && /^current$/i.test(wizardCell(row, 7))),
+      `${name} current revision in the update form`);
+  }
+
+  async function updateSupersededDocuments() {
+    if (busy) return;
+    const selected = targetWorkPackages();
+    openPanel();
+    document.getElementById(`${PANEL_ID}-log`).replaceChildren();
+    if (selected.length !== 1) {
+      setStatus('Select exactly one work package, or open its detail page, to update superseded documents.', true);
+      return;
+    }
+    const wp = selected[0];
+    const token = tokenFromSession();
+    if (!token) {
+      setStatus('Could not read the SDx session token. Reload SDx and try again.', true);
+      return;
+    }
+    busy = true;
+    closeMenu();
+    updateButton();
+    let wizard = null;
+    try {
+      setStatus(`Checking superseded documents for ${wp.name}…`);
+      const report = await readSupersededWidget(wp.name, token, wp.config, true);
+      if (!report.count) {
+        setStatus(`${wp.name} has no superseded documents to update.`);
+        return;
+      }
+      wizard = await openUpdateWizard(wp);
+      const rows = await waitForUi(() => wizardRows(wizard).length ? wizardRows(wizard) : null,
+        'required documents');
+      const obsolete = rows.filter(row => /^superseded$/i.test(wizardCell(row, 7)));
+      if (obsolete.length !== report.count) {
+        throw new Error(`${wp.name}: the Update form shows ${obsolete.length} superseded revisions but the SDx indicator shows ${report.count}. The update was canceled.`);
+      }
+      const names = [...new Set(obsolete.map(row => wizardCell(row, 2)))];
+      if (names.some(name => !name)) throw new Error('A superseded revision has no document name. The update was canceled.');
+      setProgress(`${wp.name}: found ${obsolete.length} superseded revision${obsolete.length === 1 ? '' : 's'} in the Update form.`);
+      for (const name of names) {
+        const linkedCurrent = wizardRows(wizard).filter(row => wizardCell(row, 2) === name && /^current$/i.test(wizardCell(row, 7)));
+        if (linkedCurrent.length > 1) throw new Error(`${name}: multiple current revisions are already linked. The update was canceled.`);
+        if (!linkedCurrent.length) {
+          setStatus(`Finding current revision of ${name}…`);
+          await addCurrentRevision(wizard, name);
+        }
+        setProgress(`${name}: current revision found.`);
+      }
+      const draftObsolete = wizardRows(wizard).filter(row => /^superseded$/i.test(wizardCell(row, 7)));
+      if (draftObsolete.length !== report.count) throw new Error('The required documents changed during preparation. The update was canceled.');
+      for (const row of draftObsolete) {
+        const checkbox = row.querySelector('input[type="checkbox"]');
+        if (!checkbox || checkbox.disabled) throw new Error('A superseded revision cannot be unlinked. The update was canceled.');
+        if (!checkbox.checked) clickUi(checkbox, 'superseded revision checkbox');
+      }
+      const terminate = wizardButton(wizard, 'Terminate');
+      await waitForUi(() => terminate && !terminate.disabled, 'unlink control');
+      clickUi(terminate, 'unlink control');
+      await waitForUi(() => wizardRows(wizard).length === rows.length - obsolete.length + names.filter(name =>
+        !rows.some(row => wizardCell(row, 2) === name && /^current$/i.test(wizardCell(row, 7)))).length,
+      'updated required documents list');
+      if (wizardRows(wizard).some(row => /^superseded$/i.test(wizardCell(row, 7)))) {
+        throw new Error('A superseded revision remains in the draft. The update was canceled.');
+      }
+      const accepted = window.confirm(`Update ${wp.name}?\n\n${obsolete.length} superseded revision${obsolete.length === 1 ? '' : 's'} will be unlinked and the current revision of each document will be associated.\n\n${names.join('\n')}\n\nSave this work package update in SDx?`);
+      if (!accepted) throw new Error('Canceled. No work package update was saved.');
+      clickUi(wizardButton(wizard, 'Update'), 'Update button');
+      await waitForUi(() => !document.querySelector('sda-edit-obj-modal-view'), 'Update form to close');
+      wizard = null;
+      const verified = await readSupersededWidget(wp.name, token, wp.config, true);
+      if (verified.count !== 0) throw new Error(`${wp.name} was saved, but SDx still reports ${verified.count} superseded documents. Review it in SDx.`);
+      setStatus(`${wp.name} updated. SDx now reports 0 superseded documents.`);
+      setProgress(`Replaced ${obsolete.length} superseded revision${obsolete.length === 1 ? '' : 's'} with current revisions.`);
+    } catch (error) {
+      if (wizard?.isConnected) await discardWizard().catch(() => {});
+      setStatus(error?.message || String(error), true);
+    } finally {
+      busy = false;
+      updateButton();
+    }
+  }
+
   function safeFilename(name) {
     return clean(name).replace(/[<>:"/\\|?*\u0000-\u001f]/g, '_').replace(/[. ]+$/g, '') || 'work-package';
   }
@@ -581,7 +794,7 @@
     return { count: pdfs.length, supersededCount: pdfs.filter(item => item.isSuperseded).length, filename };
   }
 
-  async function run() {
+  async function run(mode = 'block') {
     if (busy) return;
     const query = currentEntityType();
     if (!query) {
@@ -589,7 +802,7 @@
       setStatus('Open the Work Packages results list, select one or more WP rows, then run this helper.', true);
       return;
     }
-    const workPackages = selectedWorkPackages();
+    const workPackages = targetWorkPackages();
     openPanel();
     document.getElementById(`${PANEL_ID}-log`).replaceChildren();
     if (!workPackages.length) {
@@ -601,16 +814,7 @@
       setStatus('Could not read the SDx session token. Reload the SDx page and try again.', true);
       return;
     }
-    const mode = supersededMode;
-    if (mode === 'all' && !window.confirm('WARNING: Superseded drawing override is enabled. Each selected WP will be checked again. Its ZIP will include any superseded PDF revisions, if SDx returns every required file. Continue with this download?')) {
-      supersededMode = 'block';
-      closeMenu();
-      updateButton();
-      setStatus('Canceled. No drawings were downloaded.', true);
-      return;
-    }
     busy = true;
-    supersededMode = 'block';
     closeMenu();
     const button = document.getElementById(BUTTON_ID);
     if (button) button.disabled = true;
@@ -640,6 +844,67 @@
     document.getElementById(`${MENU_ID}-toggle`)?.setAttribute('aria-expanded', 'false');
   }
 
+  function closeDownloadDialog() {
+    document.getElementById(DOWNLOAD_DIALOG_ID)?.remove();
+  }
+
+  function openDownloadDialog() {
+    if (busy) return;
+    closeMenu();
+    closeDownloadDialog();
+    const overlay = document.createElement('div');
+    overlay.id = DOWNLOAD_DIALOG_ID;
+    overlay.style.cssText = 'position:fixed;inset:0;z-index:2147483647;display:flex;align-items:center;justify-content:center;background:#0008;padding:16px;font:13px/1.4 Arial,sans-serif;';
+    const dialog = document.createElement('div');
+    dialog.setAttribute('role', 'dialog');
+    dialog.setAttribute('aria-modal', 'true');
+    dialog.setAttribute('aria-label', 'Download stamped drawings');
+    dialog.style.cssText = 'width:440px;max-width:100%;background:white;color:#242424;border-radius:5px;box-shadow:0 8px 28px #0005;padding:20px;';
+    const heading = document.createElement('h2');
+    heading.textContent = 'Download stamped drawings';
+    heading.style.cssText = 'font:700 18px Arial,sans-serif;margin:0 0 12px;';
+    const count = targetWorkPackages().length;
+    const description = document.createElement('p');
+    description.textContent = `${count} work package${count === 1 ? '' : 's'} selected. A separate ZIP will be downloaded for each package. By default, a package with any superseded documents is blocked.`;
+    description.style.cssText = 'margin:0 0 14px;';
+    const label = document.createElement('label');
+    label.style.cssText = 'display:flex;gap:9px;align-items:flex-start;padding:11px;background:#fff2df;border:1px solid #d69b56;border-radius:3px;cursor:pointer;';
+    const override = document.createElement('input');
+    override.type = 'checkbox';
+    override.style.cssText = 'margin-top:2px;';
+    const warning = document.createElement('span');
+    warning.textContent = 'Include superseded PDF revisions in this download. They will be marked SUPERSEDED across the page. I understand these are out-of-date drawings.';
+    label.append(override, warning);
+    const note = document.createElement('p');
+    note.textContent = 'This selection starts unchecked every time you open this dialog.';
+    note.style.cssText = 'color:#555;font-size:11px;margin:8px 0 16px;';
+    const actions = document.createElement('div');
+    actions.style.cssText = 'display:flex;justify-content:flex-end;gap:8px;';
+    const cancel = document.createElement('button');
+    cancel.type = 'button';
+    cancel.textContent = 'Cancel';
+    cancel.style.cssText = 'border:1px solid #aaa;border-radius:3px;background:#fff;padding:8px 12px;cursor:pointer;';
+    cancel.addEventListener('click', closeDownloadDialog);
+    const confirm = document.createElement('button');
+    confirm.type = 'button';
+    confirm.textContent = 'Download stamped drawings';
+    confirm.style.cssText = 'border:1px solid #1d64b7;border-radius:3px;background:#2b79d7;color:white;padding:8px 12px;font-weight:700;cursor:pointer;';
+    override.addEventListener('change', () => {
+      confirm.textContent = override.checked ? 'Include superseded and download' : 'Download stamped drawings';
+    });
+    confirm.addEventListener('click', () => {
+      const mode = override.checked ? 'all' : 'block';
+      closeDownloadDialog();
+      run(mode);
+    });
+    actions.append(cancel, confirm);
+    dialog.append(heading, description, label, note, actions);
+    overlay.appendChild(dialog);
+    overlay.addEventListener('pointerdown', event => { if (event.target === overlay) closeDownloadDialog(); });
+    document.body.appendChild(overlay);
+    override.focus();
+  }
+
   function positionMenu() {
     const menu = document.getElementById(MENU_ID);
     const toggle = document.getElementById(`${MENU_ID}-toggle`);
@@ -663,34 +928,19 @@
     const download = document.createElement('button');
     download.type = 'button';
     download.textContent = 'Stamp & download selected WPs';
-    download.style.cssText = 'display:block;width:100%;border:0;border-radius:3px;background:#b51f24;color:white;padding:9px;cursor:pointer;font-weight:700;text-align:center;';
-    download.addEventListener('click', run);
+    download.style.cssText = 'display:block;width:100%;border:0;border-radius:3px;background:#2b79d7;color:white;padding:9px;cursor:pointer;font-weight:700;text-align:center;';
+    download.addEventListener('click', openDownloadDialog);
     menu.appendChild(download);
-
-    const modeTitle = document.createElement('div');
-    modeTitle.textContent = 'Superseded documents';
-    modeTitle.style.cssText = 'font-weight:700;margin:14px 0 5px;';
-    menu.appendChild(modeTitle);
-    const modeOptions = [
-      ['block', 'Block download (default)'],
-      ['all', 'Include superseded PDFs (override)']
-    ];
-    modeOptions.forEach(([value, labelText]) => {
-      const label = document.createElement('label');
-      label.style.cssText = 'display:flex;align-items:center;gap:7px;margin:5px 0;cursor:pointer;';
-      const radio = document.createElement('input');
-      radio.type = 'radio';
-      radio.name = `${MENU_ID}-mode`;
-      radio.value = value;
-      radio.checked = supersededMode === value;
-      radio.addEventListener('change', () => { supersededMode = value; updateButton(); });
-      label.append(radio, document.createTextNode(labelText));
-      menu.appendChild(label);
-    });
-    const modeHelp = document.createElement('div');
-    modeHelp.textContent = 'Override applies to this download only and shows a warning before every run. SDx is checked again for each WP. If a superseded PDF cannot be retrieved, that WP gets no ZIP.';
-    modeHelp.style.cssText = 'color:#555;font-size:11px;margin:5px 0 12px;';
-    menu.appendChild(modeHelp);
+    const update = document.createElement('button');
+    update.type = 'button';
+    update.textContent = 'Update superseded documents';
+    update.style.cssText = 'display:block;width:100%;border:1px solid #2b79d7;border-radius:3px;background:#fff;color:#12579f;padding:9px;cursor:pointer;font-weight:700;text-align:center;margin-top:8px;';
+    update.addEventListener('click', updateSupersededDocuments);
+    menu.appendChild(update);
+    const updateHelp = document.createElement('div');
+    updateHelp.textContent = 'Updates one work package at a time. The current revisions are reviewed before SDx saves the change.';
+    updateHelp.style.cssText = 'color:#555;font-size:11px;margin:7px 0 11px;';
+    menu.appendChild(updateHelp);
 
     const colorTitle = document.createElement('div');
     colorTitle.textContent = 'Highlight WPs with superseded documents';
@@ -734,7 +984,8 @@
     applyRowHighlights();
     refreshGridSupersededCounts();
     const toolbar = onWorkPackageResultsPage()
-      ? document.querySelector('sda-grid-header sda-power-bar-section.power-bar-controls--right') : null;
+      ? document.querySelector('sda-grid-header sda-power-bar-section.power-bar-controls--right')
+      : detailWorkPackage() ? document.querySelector('header.split-panel-header') : null;
     let group = document.getElementById(TOOLBAR_ID);
     if (!toolbar) {
       group?.remove();
@@ -748,8 +999,8 @@
       const button = document.createElement('button');
       button.id = BUTTON_ID;
       button.type = 'button';
-      button.style.cssText = 'height:34px;border:1px solid #a61b1b;border-radius:3px 0 0 3px;padding:0 9px;background:#b51f24;color:#fff;font:600 12px Arial,sans-serif;white-space:nowrap;cursor:pointer;';
-      button.addEventListener('click', event => { event.preventDefault(); event.stopPropagation(); run(); });
+      button.style.cssText = 'height:34px;border:1px solid #1d64b7;border-radius:3px 0 0 3px;padding:0 9px;background:#2b79d7;color:#fff;font:600 12px Arial,sans-serif;white-space:nowrap;cursor:pointer;';
+      button.addEventListener('click', event => { event.preventDefault(); event.stopPropagation(); document.getElementById(MENU_ID) ? closeMenu() : openMenu(); });
       const toggle = document.createElement('button');
       toggle.id = `${MENU_ID}-toggle`;
       toggle.type = 'button';
@@ -757,7 +1008,7 @@
       toggle.setAttribute('aria-label', 'SDX IWP Helper options');
       toggle.setAttribute('aria-haspopup', 'dialog');
       toggle.setAttribute('aria-expanded', 'false');
-      toggle.style.cssText = 'height:34px;width:27px;border:1px solid #a61b1b;border-left:1px solid #ffffff55;border-radius:0 3px 3px 0;background:#b51f24;color:#fff;font:700 15px Arial,sans-serif;cursor:pointer;';
+      toggle.style.cssText = 'height:34px;width:27px;border:1px solid #1d64b7;border-left:1px solid #ffffff55;border-radius:0 3px 3px 0;background:#2b79d7;color:#fff;font:700 15px Arial,sans-serif;cursor:pointer;';
       toggle.addEventListener('click', event => {
         event.preventDefault();
         event.stopPropagation();
@@ -767,15 +1018,13 @@
     }
     if (group.parentElement !== toolbar) {
       closeMenu();
-      toolbar.prepend(group);
+      if (onWorkPackageResultsPage()) toolbar.prepend(group);
+      else toolbar.appendChild(group);
     }
+    group.style.marginLeft = onWorkPackageResultsPage() ? '0' : 'auto';
     const button = document.getElementById(BUTTON_ID);
-    const count = selectedWorkPackages().length;
-    const label = `Stamp & ZIP${count ? ` (${count})` : ''}${supersededMode !== 'block' ? ' ⚠' : ''}`;
-    if (button.textContent !== label) button.textContent = label;
-    button.title = supersededMode === 'block'
-      ? 'Create a separate stamped PDF ZIP for each selected WP. Superseded documents block download.'
-      : 'Override this run: include superseded PDFs. A warning will appear before download.';
+    if (button.textContent !== 'IWP TOOLS') button.textContent = 'IWP TOOLS';
+    button.title = 'Open IWP tools';
     button.disabled = busy;
     positionMenu();
   }
@@ -794,7 +1043,7 @@
     const group = document.getElementById(TOOLBAR_ID);
     if (menu && !menu.contains(event.target) && !(group && group.contains(event.target))) closeMenu();
   }, true);
-  document.addEventListener('keydown', event => { if (event.key === 'Escape') closeMenu(); });
+  document.addEventListener('keydown', event => { if (event.key === 'Escape') { closeMenu(); closeDownloadDialog(); } });
   window.addEventListener('resize', positionMenu);
   window.addEventListener('hashchange', updateButton);
   updateButton();
