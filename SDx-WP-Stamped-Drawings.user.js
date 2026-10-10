@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SDX IWP Helper
 // @namespace    https://burnsmcd.com
-// @version      0.6.2
+// @version      0.6.3
 // @description  Stamp drawing ZIPs, flag superseded revisions, and update work package document associations.
 // @match        https://*.intergraphsmartcloud.com/*
 // @grant        none
@@ -18,6 +18,7 @@
   window.__sdxWpStampedDrawingsLoaded = true;
   try { if (window.self !== window.top) return; } catch (_) { return; }
 
+  const VERSION = '0.6.3';
   const BUTTON_ID = 'sdx-iwp-tools-button';
   const TOOLBAR_ID = 'sdx-iwp-helper-toolbar';
   const MENU_ID = 'sdx-iwp-helper-menu';
@@ -388,7 +389,9 @@
 
   function detailWorkPackage() {
     const match = /(?:\/detail\/|\/infomap-viewer;obid=)([^;?]+)/.exec(location.hash || '');
-    const name = clean(document.querySelector('header.split-panel-header__title')?.textContent);
+    const panelName = clean(document.querySelector('.split-panel-header__title')?.textContent);
+    const heading = clean(document.querySelector('h1.shell-topbar__title')?.textContent);
+    const name = heading.endsWith(' Details') ? heading.slice(0, -' Details'.length) : panelName;
     if (!match || !name) return null;
     return { id: decodeURIComponent(match[1]), name, config: currentConfigKey() };
   }
@@ -463,9 +466,14 @@
       const grid = row?.closest('.k-grid');
       const twin = grid && row?.dataset.uid && [...grid.querySelectorAll('.k-grid-content-locked tr[data-uid]')]
         .find(candidate => candidate.dataset.uid === row.dataset.uid);
-      const link = (row?.querySelector('td[id^="locked_datacell_"] a') || twin?.querySelector('td[id^="locked_datacell_"] a'));
-      clickUi(link, `${wp.name} detail link`);
-      await waitForUi(() => detailWorkPackage()?.name === wp.name, `${wp.name} detail page`);
+      const nameCell = row?.querySelector('td[id^="locked_datacell_"][id$="_1"]') ||
+        twin?.querySelector('td[id^="locked_datacell_"][id$="_1"]');
+      const nameControl = nameCell?.querySelector('.grid-object__name') || nameCell;
+      if (clean(nameControl?.textContent) !== wp.name) {
+        throw new Error(`Could not find the selected SDx row for ${wp.name}. No update was saved.`);
+      }
+      clickUi(nameControl, `${wp.name} results row name`);
+      await waitForUi(() => detailWorkPackage()?.name === wp.name, `${wp.name} side panel`);
     }
     const visibleActionIcon = () => [...document.querySelectorAll('image.main-menu-icon')]
       .find(icon => icon.querySelector('title')?.textContent === 'Actions' &&
@@ -624,7 +632,7 @@
     panel = document.createElement('div');
     panel.id = PANEL_ID;
     panel.style.cssText = 'position:fixed;right:20px;bottom:76px;z-index:2147483647;width:390px;max-height:65vh;overflow:auto;background:#fff;color:#222;border:1px solid #bbb;border-radius:8px;box-shadow:0 4px 18px #0003;padding:14px;font:14px/1.4 Arial,sans-serif;';
-    panel.innerHTML = `<div style="display:flex;justify-content:space-between;align-items:center;font-weight:700;font-size:16px"><span>IWP tools</span><button type="button" aria-label="Close" style="border:0;background:transparent;font-size:20px;cursor:pointer">×</button></div><div id="${PANEL_ID}-status" style="margin:8px 0">Ready.</div><div id="${PANEL_ID}-log"></div>`;
+    panel.innerHTML = `<div style="display:flex;justify-content:space-between;align-items:center;font-weight:700;font-size:16px"><span>IWP tools · ${VERSION}</span><button type="button" aria-label="Close" style="border:0;background:transparent;font-size:20px;cursor:pointer">×</button></div><div id="${PANEL_ID}-status" style="margin:8px 0">Ready.</div><div id="${PANEL_ID}-log"></div>`;
     panel.querySelector('button').addEventListener('click', () => panel.remove());
     document.body.appendChild(panel);
     return panel;
@@ -926,21 +934,27 @@
     menu.id = MENU_ID;
     menu.setAttribute('role', 'dialog');
     menu.setAttribute('aria-label', 'SDX IWP Helper options');
-    menu.style.cssText = 'position:fixed;z-index:2147483647;width:330px;max-width:calc(100vw - 16px);max-height:calc(100vh - 160px);overflow:auto;background:#fff;color:#242424;border:1px solid #aeb8c2;border-radius:5px;box-shadow:0 5px 20px #0004;padding:14px;font:13px/1.4 Arial,sans-serif;';
+    menu.style.cssText = 'position:fixed;z-index:2147483647;box-sizing:border-box;width:330px;max-width:calc(100vw - 16px);max-height:calc(100vh - 160px);overflow:auto;background:#fff;color:#242424;border:1px solid #aeb8c2;border-radius:5px;box-shadow:0 5px 20px #0004;padding:14px;font:13px/1.4 Arial,sans-serif;';
     const header = document.createElement('div');
-    header.textContent = 'SDX IWP Helper';
+    header.textContent = `SDX IWP Helper · ${VERSION}`;
     header.style.cssText = 'font-weight:700;font-size:15px;margin-bottom:9px;';
     menu.appendChild(header);
     const download = document.createElement('button');
     download.type = 'button';
-    download.textContent = 'Stamp & download selected WPs';
-    download.style.cssText = 'display:block;width:100%;border:0;border-radius:3px;background:#2b79d7;color:white;padding:9px;cursor:pointer;font-weight:700;text-align:center;';
+    download.style.cssText = 'display:flex!important;box-sizing:border-box!important;width:100%!important;height:auto!important;min-height:44px!important;align-items:center;justify-content:center;border:0;border-radius:3px;background:#2b79d7;color:white;padding:9px;cursor:pointer;font:700 13px/1.25 Arial,sans-serif!important;text-align:center;white-space:normal!important;';
+    const downloadLabel = document.createElement('span');
+    downloadLabel.textContent = 'Stamp & download selected WPs';
+    downloadLabel.style.cssText = 'display:block;font:700 13px/1.25 Arial,sans-serif!important;white-space:normal!important;overflow-wrap:anywhere;';
+    download.appendChild(downloadLabel);
     download.addEventListener('click', openDownloadDialog);
     menu.appendChild(download);
     const update = document.createElement('button');
     update.type = 'button';
-    update.textContent = 'Update superseded documents';
-    update.style.cssText = 'display:block;width:100%;border:1px solid #2b79d7;border-radius:3px;background:#fff;color:#12579f;padding:9px;cursor:pointer;font-weight:700;text-align:center;margin-top:8px;';
+    update.style.cssText = 'display:flex!important;box-sizing:border-box!important;width:100%!important;height:auto!important;min-height:44px!important;align-items:center;justify-content:center;border:1px solid #2b79d7;border-radius:3px;background:#fff;color:#12579f;padding:9px;cursor:pointer;font:700 13px/1.25 Arial,sans-serif!important;text-align:center;white-space:normal!important;margin-top:8px;';
+    const updateLabel = document.createElement('span');
+    updateLabel.textContent = 'Update superseded documents';
+    updateLabel.style.cssText = 'display:block;font:700 13px/1.25 Arial,sans-serif!important;white-space:normal!important;overflow-wrap:anywhere;';
+    update.appendChild(updateLabel);
     update.addEventListener('click', updateSupersededDocuments);
     menu.appendChild(update);
     const updateHelp = document.createElement('div');
@@ -991,7 +1005,9 @@
     refreshGridSupersededCounts();
     const toolbar = onWorkPackageResultsPage()
       ? document.querySelector('sda-grid-header sda-power-bar-section.power-bar-controls--right')
-      : detailWorkPackage() ? document.querySelector('header.split-panel-header') : null;
+      : detailWorkPackage()
+        ? document.querySelector('header.split-panel-header') || document.querySelector('header.shell-topbar')
+        : null;
     let group = document.getElementById(TOOLBAR_ID);
     if (!toolbar) {
       group?.remove();
