@@ -1,8 +1,11 @@
 // ==UserScript==
 // @name         SDX IWP Helper
+
 // @namespace    https://burnsmcd.com
-// @version      0.2.2
-// @description  Create one ZIP per selected SDx work package with its PDF drawings stamped on every page.
+
+// @version      0.3.0
+// @description  Flag superseded drawings, highlight affected work packages, and create stamped drawing ZIPs.
+
 // @match        https://*.intergraphsmartcloud.com/*
 // @grant        none
 // @require      https://cdnjs.cloudflare.com/ajax/libs/pdf-lib/1.17.1/pdf-lib.min.js
@@ -114,7 +117,78 @@
     } catch (_) { return null; }
   }
 
-  function selectedWorkPackages() {
+    function getKendoGrid(element) {
+    const jq = window.jQuery ? window.jQuery(element) : window.$ ? window.$(element) : null;
+    return jq && typeof jq.data === 'function' ? jq.data('kendoGrid') : null;
+  }
+
+  function rowData(row) {
+    const grid = row && row.closest('.k-grid');
+    const widget = grid && getKendoGrid(grid);
+    if (!widget || typeof widget.dataItem !== 'function') return null;
+    try { return widget.dataItem(row) || null; } catch (_) { return null; }
+  }
+
+  function normalizeKey(key) { return String(key || '').replace(/[^a-z0-9]/gi, '').toLowerCase(); }
+
+  function positiveCount(value) {
+    if (typeof value === 'number') return Number.isFinite(value) && value > 0 ? value : 0;
+    if (typeof value === 'boolean') return value ? 1 : 0;
+    if (typeof value === 'string') { const n = Number(value.trim()); return Number.isFinite(n) && n > 0 ? n : 0; }
+    if (Array.isArray(value)) return value.length;
+    if (value && typeof value === 'object') {
+      for (const [key, nested] of Object.entries(value)) if (/^(count|total|value|length)$/i.test(key)) { const n = positiveCount(nested); if (n) return n; }
+    }
+    return 0;
+  }
+
+  function supersededCountFromObject(item) {
+    if (!item || typeof item !== 'object') return null;
+    let found = false, count = 0;
+    for (const [key, value] of Object.entries(item)) {
+      const normalized = normalizeKey(key);
+      if (!normalized.includes('supersed')) continue;
+      found = true;
+      const isCount = /(count|total|number|qty|quantity|documents|drawings)$/.test(normalized) || /^(superseded|issuperseded|hassuperseded)$/.test(normalized);
+      if (isCount) count = Math.max(count, positiveCount(value));
+      else if (typeof value === 'string' && /supersed|obsolete/i.test(value)) count = Math.max(count, 1);
+    }
+    return found ? count : null;
+  }
+
+  function statusFromObject(item) {
+    if (!item || typeof item !== 'object') return '';
+    for (const [key, value] of Object.entries(item)) {
+      if (!/(status|state|lifecycle)/i.test(key) || typeof value !== 'string') continue;
+      const match = value.match(/\b(planned|active|executed)\b/i);
+      if (match) return match[1].toUpperCase();
+    }
+    return '';
+  }
+
+  function ensureRowHighlightStyles() {
+    if (document.getElementById(`${PANEL_ID}-row-styles`)) return;
+    const style = document.createElement('style');
+    style.id = `${PANEL_ID}-row-styles`;
+    style.textContent = `.sdx-iwp-superseded-planned > td{background:#fff2b3!important}.sdx-iwp-superseded-active > td{background:#f4b6b6!important}`;
+    document.head.appendChild(style);
+  }
+
+  function applyRowHighlights() {
+    if (!currentEntityType()) return;
+    ensureRowHighlightStyles();
+    document.querySelectorAll('.k-grid tr[data-uid]').forEach(row => {
+      const item = rowData(row), count = supersededCountFromObject(item), status = statusFromObject(item);
+      row.classList.remove('sdx-iwp-superseded-planned', 'sdx-iwp-superseded-active');
+      if (count > 0 && status === 'PLANNED') row.classList.add('sdx-iwp-superseded-planned');
+      if (count > 0 && (status === 'ACTIVE' || status === 'EXECUTED')) row.classList.add('sdx-iwp-superseded-active');
+      if (count > 0) row.title = `${clean(item && (item.Name || item.CI_Name))} — ${count} superseded drawing${count === 1 ? '' : 's'} (${status || 'status unavailable'})`;
+      else if (row.title && /superseded drawing/i.test(row.title)) row.removeAttribute('title');
+    });
+  }
+
+
+function selectedWorkPackages() {
     const selected = new Map();
     document.querySelectorAll(CHECKBOX_SELECTOR).forEach(checkbox => {
       if (!checkbox.checked || checkbox.disabled) return;
@@ -137,7 +211,10 @@
       if (!name || !id) return;
       selected.set(`${item.Config || item.SPFConfigUID || ''}:${id}`, {
         id: String(id), name,
-        config: item.Config || item.SPFConfigUID || null
+        config: item.Config || item.SPFConfigUID || null,
+        status: statusFromObject(item),
+        supersededCount: supersededCountFromObject(item)
+
       });
     });
     return [...selected.values()];
@@ -160,7 +237,9 @@
     if (!list) return;
     const line = document.createElement('div');
     line.textContent = message;
-    line.style.cssText = 'padding:3px 0;border-top:1px solid #e6e6e6;';
+    line.style.cssText = message.includes('WARNING:')
+      ? 'padding:6px;margin-top:4px;border-left:4px solid #d97706;background:#fff7df;color:#7c2d12;'
+      : 'padding:3px 0;border-top:1px solid #e6e6e6;';
     list.appendChild(line);
   }
 
@@ -201,7 +280,7 @@
     rows.forEach(row => {
       const id = row.Id || row.OBID || row.id || row.Name || 'Unnamed document';
       Object.entries(row).forEach(([key, value]) => {
-        if (/^(state|status|lifecyclestate|documentstate)$/i.test(key)) {
+        if (typeof value === 'string' && /supersed|obsolete/i.test(value)) {
           statusFieldFound = true;
           if (typeof value === 'string' && /supersed|obsolete/i.test(value)) names.push(clean(row.Name || id));
         }
@@ -255,7 +334,8 @@
       for (const page of pages) {
         const { width, height } = page.getSize();
         const margin = Math.max(10, Math.min(24, width * 0.012));
-        const fontSize = Math.max(11, Math.min(23, width * 0.014));
+        const fontSize = Math.max(11.55, Math.min(24.15, width * 0.0147));
+
         const textWidth = font.widthOfTextAtSize(label, fontSize);
         const x = Math.max(margin, width - margin - textWidth);
         const y = Math.max(margin, height - margin - fontSize);
@@ -272,11 +352,18 @@
     });
   }
 
-  async function downloadPackageZip(wp, token, config) {
+  async function downloadPackageZip(workPackage, token, config) {
+    const wp = workPackage.name;
+
     const zip = new JSZip();
     const rows = await listPackageDocuments(wp, token, config);
     if (!rows.length) throw new Error('No documents were returned for this work package.');
     const superseded = inspectSupersededDocuments(rows);
+    if (workPackage.supersededCount !== null && workPackage.supersededCount !== undefined) {
+      superseded.count = Math.max(superseded.count, Number(workPackage.supersededCount) || 0);
+      superseded.verified = true;
+    }
+
     if (!superseded.verified) {
       throw new Error('Could not verify superseded-document status from the SDx document list; no drawings were stamped. Please share a work package known to contain a superseded drawing so the check can be matched to its SDx field.');
     }
@@ -353,12 +440,12 @@
     try {
       for (const wp of workPackages) {
         try {
-          const count = await downloadPackageZip(wp.name, token, wp.config || query.config?.key || null);
+          const count = await downloadPackageZip(wp, token, wp.config || query.config?.key || null);
           completed++;
           setProgress(`Downloaded ${wp.name}_Stamped_Drawings.zip (${count} PDF${count === 1 ? '' : 's'}).`);
           await sleep(900);
         } catch (error) {
-          setProgress(`${wp.name}: ${error && error.message ? error.message : String(error)}`);
+          setProgress(`${error && error.message && error.message.startsWith('WARNING:') ? '⚠ ' : `${wp.name}: `}${error && error.message ? error.message : String(error)}`);
         }
       }
       setStatus(`Finished: ${completed} of ${workPackages.length} work package ZIP${workPackages.length === 1 ? '' : 's'} downloaded.`, completed !== workPackages.length);
@@ -370,6 +457,7 @@
   }
 
   function updateButton() {
+    applyRowHighlights();
     const onWpResults = Boolean(currentEntityType());
     let button = document.getElementById(BUTTON_ID);
     if (!onWpResults) {
