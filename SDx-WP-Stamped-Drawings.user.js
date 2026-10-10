@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SDX IWP Helper
 // @namespace    https://burnsmcd.com
-// @version      0.6.4
+// @version      0.6.5
 // @description  Stamp drawing ZIPs, flag superseded revisions, and update work package document associations.
 // @match        https://*.intergraphsmartcloud.com/*
 // @grant        none
@@ -18,7 +18,7 @@
   window.__sdxWpStampedDrawingsLoaded = true;
   try { if (window.self !== window.top) return; } catch (_) { return; }
 
-  const VERSION = '0.6.4';
+  const VERSION = '0.6.5';
   const BUTTON_ID = 'sdx-iwp-tools-button';
   const TOOLBAR_ID = 'sdx-iwp-helper-toolbar';
   const MENU_ID = 'sdx-iwp-helper-menu';
@@ -402,7 +402,11 @@
 
   function sidePanelWorkPackage() {
     if (!onWorkPackageResultsPage()) return null;
-    const name = clean(document.querySelector('sda-split-screen-menu .split-panel-header__title')?.textContent);
+    const panel = document.querySelector('sda-split-screen-menu');
+    if (!panel || panel.querySelector('.resize-panel-collapsed-bar')) return null;
+    const title = panel.querySelector('.split-panel-header__title');
+    if (!title?.getClientRects().length) return null;
+    const name = clean(title.textContent);
     if (!name) return null;
     const row = [...document.querySelectorAll('.k-grid-content-locked tr[data-uid]')]
       .find(candidate => workPackageNameFromRow(candidate) === name);
@@ -492,12 +496,26 @@
         .find(row => workPackageNameFromRow(row) === wp.name);
       const row = findRow();
       const nameCell = row?.querySelector('td[id^="locked_datacell_"][id$="_1"]');
-      const nameControl = nameCell?.querySelector('.grid-object__name') || nameCell;
-      if (!row || clean(nameControl?.textContent) !== wp.name) {
+      if (!row || clean(nameCell?.textContent) !== wp.name) {
         throw new Error(`Could not find the SDx results row for ${wp.name}. No update was saved.`);
       }
-      if (sidePanelWorkPackage()?.name !== wp.name) clickUi(nameControl, `${wp.name} results row name`);
-      await waitForUi(() => sidePanelWorkPackage()?.name === wp.name, `${wp.name} side panel`);
+      if (sidePanelWorkPackage()?.name !== wp.name) {
+        const resultRow = [...document.querySelectorAll('.k-grid-content tr[data-uid]')]
+          .find(candidate => candidate.dataset.uid === row.dataset.uid);
+        const selectionCell = resultRow?.querySelector('td[id^="datacell_"][id$="_0"]');
+        clickUi(selectionCell, `${wp.name} results row`);
+      }
+      await waitForUi(() => document.querySelector('sda-split-screen-menu'), 'results side panel');
+      const collapsedPanel = document.querySelector('sda-split-screen-menu .resize-panel-collapsed-bar');
+      if (collapsedPanel) {
+        clickUi(collapsedPanel.querySelector('.resize-panel-collapsed-bar__icon'), 'side panel expand button');
+      }
+      await waitForUi(() => {
+        if (!onWorkPackageResultsPage()) {
+          throw new Error(`SDx left the results page while opening ${wp.name}. No update was saved.`);
+        }
+        return sidePanelWorkPackage()?.name === wp.name;
+      }, `${wp.name} side panel`);
       const findActionsMenu = () => [...document.querySelectorAll('sda-content-menu .content-menu--open')]
         .find(menu => clean(menu.querySelector('header.content-header')?.getAttribute('title')) === wp.name);
       if (!findActionsMenu()) {
