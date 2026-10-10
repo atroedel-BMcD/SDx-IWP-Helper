@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SDX IWP Helper
 // @namespace    https://burnsmcd.com
-// @version      0.5.0
+// @version      0.5.1
 // @description  Flag superseded drawings, highlight affected work packages, and create stamped drawing ZIPs.
 // @match        https://*.intergraphsmartcloud.com/*
 // @grant        none
@@ -498,7 +498,7 @@
     if (superseded.count && mode === 'block') {
       throw new Error(`WARNING: ${wp} has ${superseded.count} superseded document${superseded.count === 1 ? '' : 's'}${superseded.names.length ? ` (${superseded.names.slice(0, 5).join(', ')}${superseded.names.length > 5 ? ', …' : ''})` : ''}. No ZIP was created.`);
     }
-    if (superseded.count) setProgress(`WARNING: ${wp} has ${superseded.count} superseded document${superseded.count === 1 ? '' : 's'}. Override selected: ${mode === 'all' ? 'include superseded versions' : 'current drawings only'}.`);
+    if (superseded.count) setProgress(`WARNING: ${wp} has ${superseded.count} superseded document${superseded.count === 1 ? '' : 's'}. Override selected: include superseded versions.`);
     let rows = await listPackageDocuments(wp, token, config);
     if (superseded.count && mode === 'all') {
       const supersededRows = superseded.documents;
@@ -552,7 +552,7 @@
     const url = URL.createObjectURL(blob);
     const anchor = document.createElement('a');
     anchor.href = url;
-    const filename = `${safeFilename(wp)}_Stamped_Drawings${superseded.count && mode === 'all' ? '_Including_Superseded' : superseded.count ? '_Current_Only_Override' : ''}.zip`;
+    const filename = `${safeFilename(wp)}_Stamped_Drawings${superseded.count ? '_Including_Superseded' : ''}.zip`;
     anchor.download = filename;
     anchor.style.display = 'none';
     document.body.appendChild(anchor);
@@ -582,8 +582,15 @@
       setStatus('Could not read the SDx session token. Reload the SDx page and try again.', true);
       return;
     }
-    busy = true;
     const mode = supersededMode;
+    if (mode === 'all' && !window.confirm('WARNING: Superseded drawing override is enabled. Each selected WP will be checked again. Its ZIP will include any superseded PDF revisions, if SDx returns every required file. Continue with this download?')) {
+      supersededMode = 'block';
+      closeMenu();
+      updateButton();
+      setStatus('Canceled. No drawings were downloaded.', true);
+      return;
+    }
+    busy = true;
     supersededMode = 'block';
     closeMenu();
     const button = document.getElementById(BUTTON_ID);
@@ -647,8 +654,7 @@
     menu.appendChild(modeTitle);
     const modeOptions = [
       ['block', 'Block download (default)'],
-      ['current', 'Allow current drawings only'],
-      ['all', 'Include superseded PDFs']
+      ['all', 'Include superseded PDFs (override)']
     ];
     modeOptions.forEach(([value, labelText]) => {
       const label = document.createElement('label');
@@ -663,7 +669,7 @@
       menu.appendChild(label);
     });
     const modeHelp = document.createElement('div');
-    modeHelp.textContent = 'Override applies to this download only. SDx is checked again for each WP. If a superseded PDF cannot be retrieved, that WP gets no ZIP.';
+    modeHelp.textContent = 'Override applies to this download only and shows a warning before every run. SDx is checked again for each WP. If a superseded PDF cannot be retrieved, that WP gets no ZIP.';
     modeHelp.style.cssText = 'color:#555;font-size:11px;margin:5px 0 12px;';
     menu.appendChild(modeHelp);
 
@@ -750,7 +756,7 @@
     if (button.textContent !== label) button.textContent = label;
     button.title = supersededMode === 'block'
       ? 'Create a separate stamped PDF ZIP for each selected WP. Superseded documents block download.'
-      : `Override this run: ${supersededMode === 'all' ? 'include superseded PDFs' : 'current drawings only'}.`;
+      : 'Override this run: include superseded PDFs. A warning will appear before download.';
     button.disabled = busy;
     positionMenu();
   }
