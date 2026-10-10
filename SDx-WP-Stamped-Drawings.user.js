@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SDX IWP Helper
 // @namespace    https://burnsmcd.com
-// @version      0.3.2
+// @version      0.4.0
 // @description  Flag superseded drawings, highlight affected work packages, and create stamped drawing ZIPs.
 // @match        https://*.intergraphsmartcloud.com/*
 // @grant        none
@@ -22,8 +22,16 @@
   const PANEL_ID = 'sdx-wp-stamped-zip-panel';
   const CHECKBOX_SELECTOR = 'input[type="checkbox"].mdc-checkbox__native-control';
   const PAGE_SIZE = 500;
+  const SUPERSEDED_WIDGET_OBID = '7OXE00EA';
+  const WORK_PACKAGE_PAGE_OBID = '7OXE00BA';
+  const GRID_COUNT_CACHE_MS = 5 * 60 * 1000;
   let busy = false;
   let capturedToken = null;
+  let gridSupersededLookupKey = '';
+  let gridScanInProgress = false;
+  let gridScanCompletedAt = 0;
+  const gridSupersededCounts = new Map();
+  const workPackageIds = new Map();
 
   const clean = value => String(value == null ? '' : value).replace(/\s+/g, ' ').trim();
   const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -130,56 +138,6 @@
     try { return widget.dataItem(row) || null; } catch (_) { return null; }
   }
 
-  function normalizeKey(key) {
-    return String(key || '').replace(/[^a-z0-9]/gi, '').toLowerCase();
-  }
-
-  function positiveCount(value) {
-    if (typeof value === 'number') return Number.isFinite(value) && value > 0 ? value : 0;
-    if (typeof value === 'boolean') return value ? 1 : 0;
-    if (typeof value === 'string') {
-      const numeric = Number(value.trim());
-      return Number.isFinite(numeric) && numeric > 0 ? numeric : 0;
-    }
-    if (Array.isArray(value)) return value.length;
-    if (value && typeof value === 'object') {
-      for (const [key, nested] of Object.entries(value)) {
-        if (/^(count|total|value|length)$/i.test(key)) {
-          const count = positiveCount(nested);
-          if (count) return count;
-        }
-      }
-    }
-    return 0;
-  }
-
-  function supersededCountFromObject(item) {
-    if (!item || typeof item !== 'object') return null;
-    let found = false;
-    let count = 0;
-    const visit = (value, depth) => {
-      if (!value || typeof value !== 'object' || depth > 4) return;
-      for (const [key, nested] of Object.entries(value)) {
-        const normalized = normalizeKey(key);
-        if (normalized.includes('supersed')) {
-          found = true;
-          const explicitCount = /(count|total|number|qty|quantity|documents|drawings)$/.test(normalized) ||
-            /^(superseded|issuperseded|hassuperseded)$/.test(normalized);
-          if (explicitCount) count = Math.max(count, positiveCount(nested));
-          else if (typeof nested === 'string' && /supersed|obsolete/i.test(nested)) count = Math.max(count, 1);
-          else if (Array.isArray(nested)) count = Math.max(count, nested.length);
-          else if (nested && typeof nested === 'object') {
-            const nestedCount = positiveCount(nested);
-            if (nestedCount) count = Math.max(count, nestedCount);
-          }
-        }
-        if (nested && typeof nested === 'object') visit(nested, depth + 1);
-      }
-    };
-    visit(item, 0);
-    return found ? count : null;
-  }
-
   function statusFromObject(item) {
     if (!item || typeof item !== 'object') return '';
     const visit = (value, depth) => {
@@ -232,15 +190,6 @@
     return statusFromRow(row);
   }
 
-  function isSupersededDocumentRow(row) {
-    if (!row || typeof row !== 'object') return false;
-    return Object.entries(row).some(([key, value]) => {
-      if (!/(type|class|category|state|status|lifecycle|supersed)/i.test(key)) return false;
-      const values = typeof value === 'string' ? [value] : value && typeof value === 'object' ? Object.values(value).filter(v => typeof v === 'string') : [];
-      return values.some(text => /SPFDocumentVersion_SS|\b(superseded|obsolete)\b/i.test(text));
-    });
-  }
-
   function ensureRowHighlightStyles() {
     if (document.getElementById(`${PANEL_ID}-row-styles`)) return;
     const style = document.createElement('style');
@@ -251,25 +200,124 @@
 
   function applyRowHighlights() {
     if (!onWorkPackageResultsPage()) return;
-    // The custom drawing list does not contain the authoritative SDx widget
-    // count. Clear highlights from earlier versions until that source is wired.
+    ensureRowHighlightStyles();
+    const query = currentEntityType();
+    const config = query && query.config && query.config.key || '';
     document.querySelectorAll('.k-grid tr[data-uid]').forEach(row => {
+      const name = workPackageNameFromRow(row);
+      const record = gridSupersededCounts.get(`${config}:${name}`.toUpperCase());
+      const count = record && Date.now() - record.checkedAt < GRID_COUNT_CACHE_MS ? record.count : null;
+      const status = statusFromGridRow(row, rowData(row));
       row.classList.remove('sdx-iwp-superseded-planned', 'sdx-iwp-superseded-active');
-      if (row.title && /superseded drawing/i.test(row.title)) row.removeAttribute('title');
+      if (count > 0 && status === 'PLANNED') row.classList.add('sdx-iwp-superseded-planned');
+      if (count > 0 && (status === 'ACTIVE' || status === 'EXECUTED')) row.classList.add('sdx-iwp-superseded-active');
+      if (count > 0) row.title = `${name} — ${count} superseded document${count === 1 ? '' : 's'} (${status || 'status unavailable'})`;
+      else if (row.title && /superseded document/i.test(row.title)) row.removeAttribute('title');
     });
   }
 
   function visibleWorkPackageNames() {
     const names = new Set();
+    const query = currentEntityType();
+    const config = query && query.config && query.config.key || null;
     document.querySelectorAll('.k-grid-content-locked tr[data-uid]').forEach(row => {
       const name = workPackageNameFromRow(row);
-      if (name) names.add(name);
+      if (!name) return;
+      names.add(name);
+      const item = rowData(row);
+      const id = clean(item && (item.OBID || item.Id || item.id));
+      if (id) workPackageIds.set(packageKey(name, config), id);
     });
     return [...names];
   }
 
+  function packageKey(name, config) {
+    return `${config || ''}:${clean(name)}`.toUpperCase();
+  }
+
+  async function findWorkPackageIds(names, token, config) {
+    const unresolved = names.filter(name => !workPackageIds.has(packageKey(name, config)));
+    for (let offset = 0; offset < unresolved.length; offset += 25) {
+      const batch = unresolved.slice(offset, offset + 25);
+      const filter = batch.map(name => `Name eq '${name.replace(/'/g, "''")}'`).join(' or ');
+      const params = new URLSearchParams({ '$format': 'json', '$top': '100', '$filter': `(${filter})` });
+      const data = await apiJson(`${apiBase()}/WorkPackages?${params}`, token, config, { method: 'GET' });
+      const rows = Array.isArray(data.value) ? data.value : [];
+      rows.forEach(row => {
+        const name = clean(row.Name || row.CI_Name);
+        const id = clean(row.OBID || row.Id || row.id);
+        if (name && id && batch.some(candidate => candidate.toUpperCase() === name.toUpperCase())) {
+          workPackageIds.set(packageKey(name, config), id);
+        }
+      });
+    }
+  }
+
+  async function readSupersededWidget(name, token, config, fresh) {
+    const key = packageKey(name, config);
+    const cached = gridSupersededCounts.get(key);
+    if (!fresh && cached && Date.now() - cached.checkedAt < GRID_COUNT_CACHE_MS) return cached;
+    await findWorkPackageIds([name], token, config);
+    const id = workPackageIds.get(key);
+    if (!id) throw new Error(`Could not find SDx object ID for ${name}.`);
+    const quotedId = `'${id.replace(/'/g, "''")}'`;
+    const body = {
+      WidgetOBID: SUPERSEDED_WIDGET_OBID,
+      ReturnMetadata: true,
+      EnvironmentVariables: {
+        "'{{CURRENT_OBJECT_ID}}'": quotedId,
+        '{{CURRENT_OBJECT_ID}}': quotedId
+      },
+      PageOBID: WORK_PACKAGE_PAGE_OBID
+    };
+    const data = await apiJson(`${apiBase()}/ExecuteDynamicRequest`, token, config, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    });
+    const count = Number(data && data.TotalCount);
+    if (!data || data.RequestSuccessful !== true || data.Status !== 'OK' || !Number.isSafeInteger(count) || count < 0) {
+      throw new Error(`SDx did not return a valid Superseded Documents count for ${name}.`);
+    }
+    const result = {
+      count,
+      names: Array.isArray(data.Values) ? data.Values.map(value => clean(value.Name)).filter(Boolean) : [],
+      checkedAt: Date.now()
+    };
+    gridSupersededCounts.set(key, result);
+    applyRowHighlights();
+    return result;
+  }
+
   async function refreshGridSupersededCounts() {
-    // Re-enabled when the authoritative Superseded Documents request is known.
+    const query = currentEntityType();
+    if (!query || !onWorkPackageResultsPage() || gridScanInProgress) return;
+    const config = query.config && query.config.key || null;
+    const names = visibleWorkPackageNames();
+    const key = `${config || ''}:${names.join('|')}`;
+    if (!names.length || (key === gridSupersededLookupKey && Date.now() - gridScanCompletedAt < GRID_COUNT_CACHE_MS)) return;
+    const token = tokenFromSession();
+    if (!token) return;
+    gridScanInProgress = true;
+    try {
+      await findWorkPackageIds(names, token, config);
+      let next = 0;
+      const workers = Array.from({ length: Math.min(4, names.length) }, async () => {
+        while (next < names.length && onWorkPackageResultsPage()) {
+          const name = names[next++];
+          try { await readSupersededWidget(name, token, config, false); }
+          catch (_) { /* An unknown count never clears a WP for download. */ }
+        }
+      });
+      await Promise.all(workers);
+      gridSupersededLookupKey = key;
+      gridScanCompletedAt = Date.now();
+    } catch (_) {
+      // The per-package preflight still runs before any drawing is stamped.
+    } finally {
+      gridScanInProgress = false;
+      applyRowHighlights();
+    }
   }
 
   function selectedWorkPackages() {
@@ -346,35 +394,6 @@
     return rows;
   }
 
-  function inspectSupersededDocuments(rows, wp) {
-    const names = [];
-    let count = 0;
-    rows.forEach(row => {
-      const id = row.Id || row.OBID || row.id || row.Name || 'Unnamed document';
-      if (isSupersededDocumentRow(row)) {
-        names.push(clean(row.Name || id));
-      }
-      Object.entries(row).forEach(([key, value]) => {
-        if (/supersed/i.test(key)) {
-          const foundCount = positiveCount(value);
-          if (foundCount) {
-            count = Math.max(count, foundCount);
-            names.push(clean(row.Name || id));
-          } else if (typeof value === 'string' && /supersed|obsolete/i.test(value)) {
-            count++;
-            names.push(clean(row.Name || id));
-          }
-        }
-        if (/(state|status|lifecycle)/i.test(key) && typeof value === 'string' && /supersed|obsolete/i.test(value)) {
-          count++;
-          names.push(clean(row.Name || id));
-        }
-      });
-    });
-    const uniqueNames = [...new Set(names)];
-    return { verified: false, count: Math.max(count, uniqueNames.length), names: uniqueNames };
-  }
-
   async function resolveAttachedFiles(rows, token, config) {
     const map = new Map();
     const documents = rows.map(row => ({ id: row.Id || row.OBID || row.id, config: row.Config || row.SPFConfigUID || config }))
@@ -433,18 +452,22 @@
 
   async function downloadPackageZip(workPackage, token, config) {
     const wp = workPackage.name;
-    const zip = new JSZip();
-    const rows = await listPackageDocuments(wp, token, config);
-    const superseded = inspectSupersededDocuments(rows, workPackage);
+    if (workPackage.id) workPackageIds.set(packageKey(wp, config), workPackage.id);
+    setStatus(`Checking SDx Superseded Documents for ${wp}…`);
+    let superseded;
+    try {
+      superseded = await readSupersededWidget(wp, token, config, true);
+    } catch (error) {
+      throw new Error(`WARNING: Could not verify SDx's Superseded Documents count for ${wp}: ${error && error.message || error}. No drawings were stamped or downloaded.`);
+    }
     if (superseded.count) {
       throw new Error(`WARNING: ${wp} has ${superseded.count} superseded drawing${superseded.count === 1 ? '' : 's'}${superseded.names.length ? ` (${superseded.names.slice(0, 5).join(', ')}${superseded.names.length > 5 ? ', …' : ''})` : ''}. No ZIP was created.`);
     }
-    if (!superseded.verified) {
-      throw new Error(`WARNING: Could not verify SDx's Superseded Documents count for ${wp}. No drawings were stamped or downloaded.`);
-    }
+    const rows = await listPackageDocuments(wp, token, config);
     if (!rows.length) {
-      throw new Error(`No current drawings were returned for ${wp}. The work package has no downloadable current drawings${superseded.verified ? ' and no superseded drawings were reported' : ', and SDx did not provide a superseded-drawing count'}; check the WP document lists in SDx.`);
+      throw new Error(`No current drawings were returned for ${wp}. Check the work package's Documents list in SDx.`);
     }
+    const zip = new JSZip();
     setStatus(`Finding attached PDFs for ${wp}…`);
     const fileMap = await resolveAttachedFiles(rows, token, config);
     const pdfs = [];
