@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SDX IWP Helper
 // @namespace    https://burnsmcd.com
-// @version      0.5.1
+// @version      0.5.2
 // @description  Flag superseded drawings, highlight affected work packages, and create stamped drawing ZIPs.
 // @match        https://*.intergraphsmartcloud.com/*
 // @grant        none
@@ -459,14 +459,32 @@
     return info.Uri || info.URL;
   }
 
-  function stampPdfBytes(bytes, wpNumber) {
-    const { PDFDocument, StandardFonts, rgb } = PDFLib;
+  function stampPdfBytes(bytes, wpNumber, isSuperseded) {
+    const { PDFDocument, StandardFonts, degrees, rgb } = PDFLib;
     return PDFDocument.load(bytes, { ignoreEncryption: false }).then(async pdf => {
       const font = await pdf.embedFont(StandardFonts.HelveticaBold);
       const label = `WP # ${wpNumber} CONTROLLED`;
       const pages = pdf.getPages();
       for (const page of pages) {
         const { width, height } = page.getSize();
+        if (isSuperseded) {
+          const watermark = 'SUPERSEDED';
+          const angle = Math.atan2(height, width);
+          const watermarkSize = Math.hypot(width, height) * 0.72 / font.widthOfTextAtSize(watermark, 1);
+          const watermarkWidth = font.widthOfTextAtSize(watermark, watermarkSize);
+          const watermarkHeight = font.heightAtSize(watermarkSize);
+          const cosine = Math.cos(angle);
+          const sine = Math.sin(angle);
+          page.drawText(watermark, {
+            x: (width - watermarkWidth * cosine + watermarkHeight * sine) / 2,
+            y: (height - watermarkWidth * sine - watermarkHeight * cosine) / 2,
+            size: watermarkSize,
+            font,
+            rotate: degrees(angle * 180 / Math.PI),
+            color: rgb(0.84, 0.04, 0.08),
+            opacity: 0.28
+          });
+        }
         const margin = Math.max(10, Math.min(24, width * 0.012));
         const fontSize = Math.max(11.55, Math.min(24.15, width * 0.0147));
         const textWidth = font.widthOfTextAtSize(label, fontSize);
@@ -515,6 +533,7 @@
     const zip = new JSZip();
     setStatus(`Finding attached PDFs for ${wp}…`);
     const fileMap = await resolveAttachedFiles(rows, token, config);
+    const supersededIds = new Set(superseded.documents.map(row => clean(row.Id || row.OBID || row.id)));
     const pdfs = [];
     for (const row of rows) {
       const id = row.Id || row.OBID || row.id;
@@ -522,7 +541,7 @@
       const guessName = clean(row.Attached_File || row.Name || 'drawing.pdf');
       const fileName = clean((file && file.name) || guessName);
       if (!/\.pdf$/i.test(fileName)) continue;
-      if (file) pdfs.push({ row, file, fileName });
+      if (file) pdfs.push({ row, file, fileName, isSuperseded: mode === 'all' && supersededIds.has(clean(id)) });
     }
     if (!pdfs.length) throw new Error(`No attached PDF drawings were found for ${wp}. The listed documents may have no downloadable PDF file attached.`);
     if (superseded.count && mode === 'all') {
@@ -533,12 +552,12 @@
     const used = new Set();
     for (let index = 0; index < pdfs.length; index++) {
       const item = pdfs[index];
-      setStatus(`Stamping ${wp}: ${index + 1} of ${pdfs.length} — ${item.fileName}`);
+      setStatus(`Stamping ${wp}: ${index + 1} of ${pdfs.length} — ${item.fileName}${item.isSuperseded ? ' [SUPERSEDED]' : ''}`);
       const uri = await retrieveFileUri(item.file.obid, token, item.row.Config || item.row.SPFConfigUID || config);
       let response = await fetch(uri, { method: 'GET', credentials: 'include' });
       if (!response.ok) response = await fetch(uri, { method: 'GET', credentials: 'include', headers: { Authorization: `Bearer ${token}` } });
       if (!response.ok) throw new Error(`Could not download ${item.fileName} (HTTP ${response.status}).`);
-      const stamped = await stampPdfBytes(await response.arrayBuffer(), wp);
+      const stamped = await stampPdfBytes(await response.arrayBuffer(), wp, item.isSuperseded);
       let name = item.fileName;
       if (used.has(name.toLowerCase())) {
         const dot = name.toLowerCase().lastIndexOf('.pdf');
@@ -559,7 +578,7 @@
     anchor.click();
     anchor.remove();
     setTimeout(() => URL.revokeObjectURL(url), 60000);
-    return { count: pdfs.length, filename };
+    return { count: pdfs.length, supersededCount: pdfs.filter(item => item.isSuperseded).length, filename };
   }
 
   async function run() {
@@ -601,7 +620,7 @@
         try {
           const result = await downloadPackageZip(wp, token, wp.config || query.config?.key || null, mode);
           completed++;
-          setProgress(`Downloaded ${result.filename} (${result.count} PDF${result.count === 1 ? '' : 's'}).`);
+          setProgress(`Downloaded ${result.filename} (${result.count} PDF${result.count === 1 ? '' : 's'}${result.supersededCount ? `; ${result.supersededCount} marked SUPERSEDED` : ''}).`);
           await sleep(900);
         } catch (error) {
           const detail = error && error.message ? error.message : String(error);
