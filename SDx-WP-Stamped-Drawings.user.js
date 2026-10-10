@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SDX IWP Helper
 // @namespace    https://burnsmcd.com
-// @version      0.3.1
+// @version      0.3.2
 // @description  Flag superseded drawings, highlight affected work packages, and create stamped drawing ZIPs.
 // @match        https://*.intergraphsmartcloud.com/*
 // @grant        none
@@ -24,8 +24,6 @@
   const PAGE_SIZE = 500;
   let busy = false;
   let capturedToken = null;
-  let gridSupersededLookupKey = '';
-  const gridSupersededCounts = new Map();
 
   const clean = value => String(value == null ? '' : value).replace(/\s+/g, ' ').trim();
   const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -253,21 +251,11 @@
 
   function applyRowHighlights() {
     if (!onWorkPackageResultsPage()) return;
-    ensureRowHighlightStyles();
+    // The custom drawing list does not contain the authoritative SDx widget
+    // count. Clear highlights from earlier versions until that source is wired.
     document.querySelectorAll('.k-grid tr[data-uid]').forEach(row => {
-      const item = rowData(row);
-      const name = workPackageNameFromRow(row);
-      const itemCount = supersededCountFromObject(item);
-      const query = currentEntityType();
-      const config = query && query.config && query.config.key || '';
-      const cachedCount = gridSupersededCounts.get(`${config.toUpperCase()}:${name.toUpperCase()}`) || 0;
-      const count = Math.max(itemCount || 0, cachedCount);
-      const status = statusFromGridRow(row, item);
       row.classList.remove('sdx-iwp-superseded-planned', 'sdx-iwp-superseded-active');
-      if (count > 0 && status === 'PLANNED') row.classList.add('sdx-iwp-superseded-planned');
-      if (count > 0 && (status === 'ACTIVE' || status === 'EXECUTED')) row.classList.add('sdx-iwp-superseded-active');
-      if (count > 0) row.title = `${name} — ${count} superseded drawing${count === 1 ? '' : 's'} (${status || 'status unavailable'})`;
-      else if (row.title && /superseded drawing/i.test(row.title)) row.removeAttribute('title');
+      if (row.title && /superseded drawing/i.test(row.title)) row.removeAttribute('title');
     });
   }
 
@@ -281,42 +269,7 @@
   }
 
   async function refreshGridSupersededCounts() {
-    const query = currentEntityType();
-    if (!query || !onWorkPackageResultsPage()) return;
-    const names = visibleWorkPackageNames();
-    const key = `${query.config && query.config.key || ''}:${names.join('|')}`;
-    if (!names.length || key === gridSupersededLookupKey) return;
-    const token = tokenFromSession();
-    if (!token) return;
-    gridSupersededLookupKey = key;
-    try {
-      const seen = new Map();
-      for (let offset = 0; offset < names.length; offset += 25) {
-        const batchNames = names.slice(offset, offset + 25);
-        const filter = `(${batchNames.map(name => `WP eq '${name.replace(/'/g, "''")}'`).join(' or ')})`;
-        let skip = 0;
-        for (;;) {
-          const params = new URLSearchParams({ '$format': 'json', '$top': String(PAGE_SIZE), '$skip': String(skip), '$filter': filter, '$count': 'true' });
-          const data = await apiJson(`${apiBase()}/BMcD_SubContractor_Docs?${params}`, token, query.config && query.config.key || null, { method: 'GET' });
-          const rows = Array.isArray(data.value) ? data.value : [];
-          rows.forEach(row => {
-            if (!isSupersededDocumentRow(row)) return;
-            const wp = clean(row.WP);
-            if (!wp) return;
-            const key = `${query.config && query.config.key || ''}:${wp}`.toUpperCase();
-            if (!seen.has(key)) seen.set(key, new Set());
-            seen.get(key).add(String(row.Id || row.OBID || row.id || row.Name || JSON.stringify(row)));
-          });
-          if (!rows.length || rows.length < PAGE_SIZE || (Number(data['@odata.count']) && skip + rows.length >= Number(data['@odata.count']))) break;
-          skip += rows.length;
-        }
-      }
-      names.forEach(name => gridSupersededCounts.set(`${query.config && query.config.key || ''}:${name}`.toUpperCase(), 0));
-      seen.forEach((documents, key) => gridSupersededCounts.set(key, documents.size));
-      applyRowHighlights();
-    } catch (_) {
-      // Download preflight still checks the selected WP; keep the grid usable if this optional lookup fails.
-    }
+    // Re-enabled when the authoritative Superseded Documents request is known.
   }
 
   function selectedWorkPackages() {
@@ -331,15 +284,10 @@
       if (!name) return;
       const query = currentEntityType();
       const config = item && (item.Config || item.SPFConfigUID) || query && query.config && query.config.key || null;
-      const itemCount = supersededCountFromObject(item);
-      const countKey = `${config || ''}:${name}`.toUpperCase();
-      const hasCachedCount = gridSupersededCounts.has(countKey);
-      const cachedCount = gridSupersededCounts.get(countKey);
       selected.set(`${config || ''}:${name}`.toUpperCase(), {
         id: String(item && (item.OBID || item.Id) || ''), name,
         config,
-        status: statusFromGridRow(row, item),
-        supersededCount: itemCount !== null ? Math.max(itemCount, cachedCount || 0) : hasCachedCount ? cachedCount : null
+        status: statusFromGridRow(row, item)
       });
     });
     return [...selected.values()];
@@ -399,18 +347,15 @@
   }
 
   function inspectSupersededDocuments(rows, wp) {
-    let countFieldFound = wp && wp.supersededCount !== null && wp.supersededCount !== undefined;
     const names = [];
-    let count = Number(countFieldFound ? wp.supersededCount : 0) || 0;
+    let count = 0;
     rows.forEach(row => {
       const id = row.Id || row.OBID || row.id || row.Name || 'Unnamed document';
       if (isSupersededDocumentRow(row)) {
-        countFieldFound = true;
         names.push(clean(row.Name || id));
       }
       Object.entries(row).forEach(([key, value]) => {
         if (/supersed/i.test(key)) {
-          countFieldFound = true;
           const foundCount = positiveCount(value);
           if (foundCount) {
             count = Math.max(count, foundCount);
@@ -421,14 +366,13 @@
           }
         }
         if (/(state|status|lifecycle)/i.test(key) && typeof value === 'string' && /supersed|obsolete/i.test(value)) {
-          countFieldFound = true;
           count++;
           names.push(clean(row.Name || id));
         }
       });
     });
     const uniqueNames = [...new Set(names)];
-    return { verified: Boolean(countFieldFound), count: Math.max(count, uniqueNames.length), names: uniqueNames };
+    return { verified: false, count: Math.max(count, uniqueNames.length), names: uniqueNames };
   }
 
   async function resolveAttachedFiles(rows, token, config) {
@@ -492,11 +436,11 @@
     const zip = new JSZip();
     const rows = await listPackageDocuments(wp, token, config);
     const superseded = inspectSupersededDocuments(rows, workPackage);
-    if (!superseded.verified) {
-      throw new Error(`WARNING: Could not verify the superseded-drawing count for ${wp}. No drawings were stamped. The SDx work package record did not expose a superseded count, and its document list did not expose a lifecycle status.`);
-    }
     if (superseded.count) {
       throw new Error(`WARNING: ${wp} has ${superseded.count} superseded drawing${superseded.count === 1 ? '' : 's'}${superseded.names.length ? ` (${superseded.names.slice(0, 5).join(', ')}${superseded.names.length > 5 ? ', …' : ''})` : ''}. No ZIP was created.`);
+    }
+    if (!superseded.verified) {
+      throw new Error(`WARNING: Could not verify SDx's Superseded Documents count for ${wp}. No drawings were stamped or downloaded.`);
     }
     if (!rows.length) {
       throw new Error(`No current drawings were returned for ${wp}. The work package has no downloadable current drawings${superseded.verified ? ' and no superseded drawings were reported' : ', and SDx did not provide a superseded-drawing count'}; check the WP document lists in SDx.`);
