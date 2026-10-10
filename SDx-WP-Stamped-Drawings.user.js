@@ -1,11 +1,8 @@
 // ==UserScript==
 // @name         SDX IWP Helper
-
 // @namespace    https://burnsmcd.com
-
-// @version      0.3.0
+// @version      0.3.1
 // @description  Flag superseded drawings, highlight affected work packages, and create stamped drawing ZIPs.
-
 // @match        https://*.intergraphsmartcloud.com/*
 // @grant        none
 // @require      https://cdnjs.cloudflare.com/ajax/libs/pdf-lib/1.17.1/pdf-lib.min.js
@@ -27,6 +24,8 @@
   const PAGE_SIZE = 500;
   let busy = false;
   let capturedToken = null;
+  let gridSupersededLookupKey = '';
+  const gridSupersededCounts = new Map();
 
   const clean = value => String(value == null ? '' : value).replace(/\s+/g, ' ').trim();
   const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -110,6 +109,10 @@
     } catch (_) { return null; }
   }
 
+  function onWorkPackageResultsPage() {
+    return Boolean(currentEntityType() && /^#\/results(?:;|\/|$)/.test(location.hash || ''));
+  }
+
   function getJQueryData(element, key) {
     try {
       const jq = window.jQuery ? window.jQuery(element) : window.$ ? window.$(element) : null;
@@ -117,7 +120,7 @@
     } catch (_) { return null; }
   }
 
-    function getKendoGrid(element) {
+  function getKendoGrid(element) {
     const jq = window.jQuery ? window.jQuery(element) : window.$ ? window.$(element) : null;
     return jq && typeof jq.data === 'function' ? jq.data('kendoGrid') : null;
   }
@@ -129,41 +132,115 @@
     try { return widget.dataItem(row) || null; } catch (_) { return null; }
   }
 
-  function normalizeKey(key) { return String(key || '').replace(/[^a-z0-9]/gi, '').toLowerCase(); }
+  function normalizeKey(key) {
+    return String(key || '').replace(/[^a-z0-9]/gi, '').toLowerCase();
+  }
 
   function positiveCount(value) {
     if (typeof value === 'number') return Number.isFinite(value) && value > 0 ? value : 0;
     if (typeof value === 'boolean') return value ? 1 : 0;
-    if (typeof value === 'string') { const n = Number(value.trim()); return Number.isFinite(n) && n > 0 ? n : 0; }
+    if (typeof value === 'string') {
+      const numeric = Number(value.trim());
+      return Number.isFinite(numeric) && numeric > 0 ? numeric : 0;
+    }
     if (Array.isArray(value)) return value.length;
     if (value && typeof value === 'object') {
-      for (const [key, nested] of Object.entries(value)) if (/^(count|total|value|length)$/i.test(key)) { const n = positiveCount(nested); if (n) return n; }
+      for (const [key, nested] of Object.entries(value)) {
+        if (/^(count|total|value|length)$/i.test(key)) {
+          const count = positiveCount(nested);
+          if (count) return count;
+        }
+      }
     }
     return 0;
   }
 
   function supersededCountFromObject(item) {
     if (!item || typeof item !== 'object') return null;
-    let found = false, count = 0;
-    for (const [key, value] of Object.entries(item)) {
-      const normalized = normalizeKey(key);
-      if (!normalized.includes('supersed')) continue;
-      found = true;
-      const isCount = /(count|total|number|qty|quantity|documents|drawings)$/.test(normalized) || /^(superseded|issuperseded|hassuperseded)$/.test(normalized);
-      if (isCount) count = Math.max(count, positiveCount(value));
-      else if (typeof value === 'string' && /supersed|obsolete/i.test(value)) count = Math.max(count, 1);
-    }
+    let found = false;
+    let count = 0;
+    const visit = (value, depth) => {
+      if (!value || typeof value !== 'object' || depth > 4) return;
+      for (const [key, nested] of Object.entries(value)) {
+        const normalized = normalizeKey(key);
+        if (normalized.includes('supersed')) {
+          found = true;
+          const explicitCount = /(count|total|number|qty|quantity|documents|drawings)$/.test(normalized) ||
+            /^(superseded|issuperseded|hassuperseded)$/.test(normalized);
+          if (explicitCount) count = Math.max(count, positiveCount(nested));
+          else if (typeof nested === 'string' && /supersed|obsolete/i.test(nested)) count = Math.max(count, 1);
+          else if (Array.isArray(nested)) count = Math.max(count, nested.length);
+          else if (nested && typeof nested === 'object') {
+            const nestedCount = positiveCount(nested);
+            if (nestedCount) count = Math.max(count, nestedCount);
+          }
+        }
+        if (nested && typeof nested === 'object') visit(nested, depth + 1);
+      }
+    };
+    visit(item, 0);
     return found ? count : null;
   }
 
   function statusFromObject(item) {
     if (!item || typeof item !== 'object') return '';
-    for (const [key, value] of Object.entries(item)) {
-      if (!/(status|state|lifecycle)/i.test(key) || typeof value !== 'string') continue;
-      const match = value.match(/\b(planned|active|executed)\b/i);
-      if (match) return match[1].toUpperCase();
+    const visit = (value, depth) => {
+      if (!value || typeof value !== 'object' || depth > 4) return '';
+      for (const [key, nested] of Object.entries(value)) {
+        if (/(status|state|lifecycle)/i.test(key) && typeof nested === 'string') {
+          const match = nested.match(/\b(planned|active|executed)\b/i);
+          if (match) return match[1].toUpperCase();
+        }
+        if (nested && typeof nested === 'object') {
+          const match = visit(nested, depth + 1);
+          if (match) return match;
+        }
+      }
+      return '';
+    };
+    return visit(item, 0);
+  }
+
+  function statusFromRow(row) {
+    const text = clean(row && row.innerText);
+    const match = text.match(/\b(planned|active|executed)\b/i);
+    return match ? match[1].toUpperCase() : '';
+  }
+
+  function workPackageNameFromRow(row) {
+    const item = rowData(row);
+    const fromItem = clean(item && (item.Name || item.CI_Name));
+    if (fromItem) return fromItem;
+    let nameCell = row && row.querySelector('td[id^="locked_datacell_"][id$="_1"]');
+    if (!nameCell && row && row.dataset.uid) {
+      const grid = row.closest('.k-grid');
+      const lockedTwin = grid && [...grid.querySelectorAll('.k-grid-content-locked tr[data-uid]')].find(twin => twin.dataset.uid === row.dataset.uid);
+      nameCell = lockedTwin && lockedTwin.querySelector('td[id^="locked_datacell_"][id$="_1"]');
     }
-    return '';
+    return clean(nameCell && nameCell.innerText);
+  }
+
+  function statusFromGridRow(row, item) {
+    const fromItem = statusFromObject(item);
+    if (fromItem) return fromItem;
+    if (row) {
+      const grid = row.closest('.k-grid');
+      const uid = row.dataset.uid;
+      const centerTwin = grid && [...grid.querySelectorAll('.k-grid-content tr[data-uid]')].find(twin => twin.dataset.uid === uid);
+      const statusCell = centerTwin && centerTwin.querySelector('td[id^="datacell_"][id$="_3"]');
+      const status = statusFromRow(statusCell || row);
+      if (status) return status;
+    }
+    return statusFromRow(row);
+  }
+
+  function isSupersededDocumentRow(row) {
+    if (!row || typeof row !== 'object') return false;
+    return Object.entries(row).some(([key, value]) => {
+      if (!/(type|class|category|state|status|lifecycle|supersed)/i.test(key)) return false;
+      const values = typeof value === 'string' ? [value] : value && typeof value === 'object' ? Object.values(value).filter(v => typeof v === 'string') : [];
+      return values.some(text => /SPFDocumentVersion_SS|\b(superseded|obsolete)\b/i.test(text));
+    });
   }
 
   function ensureRowHighlightStyles() {
@@ -175,46 +252,94 @@
   }
 
   function applyRowHighlights() {
-    if (!currentEntityType()) return;
+    if (!onWorkPackageResultsPage()) return;
     ensureRowHighlightStyles();
     document.querySelectorAll('.k-grid tr[data-uid]').forEach(row => {
-      const item = rowData(row), count = supersededCountFromObject(item), status = statusFromObject(item);
+      const item = rowData(row);
+      const name = workPackageNameFromRow(row);
+      const itemCount = supersededCountFromObject(item);
+      const query = currentEntityType();
+      const config = query && query.config && query.config.key || '';
+      const cachedCount = gridSupersededCounts.get(`${config.toUpperCase()}:${name.toUpperCase()}`) || 0;
+      const count = Math.max(itemCount || 0, cachedCount);
+      const status = statusFromGridRow(row, item);
       row.classList.remove('sdx-iwp-superseded-planned', 'sdx-iwp-superseded-active');
       if (count > 0 && status === 'PLANNED') row.classList.add('sdx-iwp-superseded-planned');
       if (count > 0 && (status === 'ACTIVE' || status === 'EXECUTED')) row.classList.add('sdx-iwp-superseded-active');
-      if (count > 0) row.title = `${clean(item && (item.Name || item.CI_Name))} — ${count} superseded drawing${count === 1 ? '' : 's'} (${status || 'status unavailable'})`;
+      if (count > 0) row.title = `${name} — ${count} superseded drawing${count === 1 ? '' : 's'} (${status || 'status unavailable'})`;
       else if (row.title && /superseded drawing/i.test(row.title)) row.removeAttribute('title');
     });
   }
 
+  function visibleWorkPackageNames() {
+    const names = new Set();
+    document.querySelectorAll('.k-grid-content-locked tr[data-uid]').forEach(row => {
+      const name = workPackageNameFromRow(row);
+      if (name) names.add(name);
+    });
+    return [...names];
+  }
 
-function selectedWorkPackages() {
-    const selected = new Map();
-    document.querySelectorAll(CHECKBOX_SELECTOR).forEach(checkbox => {
-      if (!checkbox.checked || checkbox.disabled) return;
-      const grid = checkbox.closest('.k-grid');
-      const widget = grid && getJQueryData(grid, 'kendoGrid');
-      if (!widget || typeof widget.dataItem !== 'function') return;
-      const row = checkbox.closest('tr[data-uid]') || checkbox.closest('tr, [role="row"]');
-      if (!row) return;
-      let item = null;
-      try { item = widget.dataItem(row); } catch (_) { /* try the paired locked-column row */ }
-      if (!item && row.dataset.uid) {
-        const twin = grid.querySelector(`tr[data-uid="${CSS.escape(row.dataset.uid)}"]`);
-        if (twin) {
-          try { item = widget.dataItem(twin); } catch (_) { /* ignored */ }
+  async function refreshGridSupersededCounts() {
+    const query = currentEntityType();
+    if (!query || !onWorkPackageResultsPage()) return;
+    const names = visibleWorkPackageNames();
+    const key = `${query.config && query.config.key || ''}:${names.join('|')}`;
+    if (!names.length || key === gridSupersededLookupKey) return;
+    const token = tokenFromSession();
+    if (!token) return;
+    gridSupersededLookupKey = key;
+    try {
+      const seen = new Map();
+      for (let offset = 0; offset < names.length; offset += 25) {
+        const batchNames = names.slice(offset, offset + 25);
+        const filter = `(${batchNames.map(name => `WP eq '${name.replace(/'/g, "''")}'`).join(' or ')})`;
+        let skip = 0;
+        for (;;) {
+          const params = new URLSearchParams({ '$format': 'json', '$top': String(PAGE_SIZE), '$skip': String(skip), '$filter': filter, '$count': 'true' });
+          const data = await apiJson(`${apiBase()}/BMcD_SubContractor_Docs?${params}`, token, query.config && query.config.key || null, { method: 'GET' });
+          const rows = Array.isArray(data.value) ? data.value : [];
+          rows.forEach(row => {
+            if (!isSupersededDocumentRow(row)) return;
+            const wp = clean(row.WP);
+            if (!wp) return;
+            const key = `${query.config && query.config.key || ''}:${wp}`.toUpperCase();
+            if (!seen.has(key)) seen.set(key, new Set());
+            seen.get(key).add(String(row.Id || row.OBID || row.id || row.Name || JSON.stringify(row)));
+          });
+          if (!rows.length || rows.length < PAGE_SIZE || (Number(data['@odata.count']) && skip + rows.length >= Number(data['@odata.count']))) break;
+          skip += rows.length;
         }
       }
-      if (!item) return;
-      const name = clean(item.Name || item.CI_Name);
-      const id = item.OBID || item.Id;
-      if (!name || !id) return;
-      selected.set(`${item.Config || item.SPFConfigUID || ''}:${id}`, {
-        id: String(id), name,
-        config: item.Config || item.SPFConfigUID || null,
-        status: statusFromObject(item),
-        supersededCount: supersededCountFromObject(item)
+      names.forEach(name => gridSupersededCounts.set(`${query.config && query.config.key || ''}:${name}`.toUpperCase(), 0));
+      seen.forEach((documents, key) => gridSupersededCounts.set(key, documents.size));
+      applyRowHighlights();
+    } catch (_) {
+      // Download preflight still checks the selected WP; keep the grid usable if this optional lookup fails.
+    }
+  }
 
+  function selectedWorkPackages() {
+    const selected = new Map();
+    if (!onWorkPackageResultsPage()) return [];
+    document.querySelectorAll(CHECKBOX_SELECTOR).forEach(checkbox => {
+      if (!checkbox.checked || checkbox.disabled) return;
+      const row = checkbox.closest('tr[data-uid]') || checkbox.closest('tr, [role="row"]');
+      if (!row) return;
+      const item = rowData(row);
+      const name = workPackageNameFromRow(row);
+      if (!name) return;
+      const query = currentEntityType();
+      const config = item && (item.Config || item.SPFConfigUID) || query && query.config && query.config.key || null;
+      const itemCount = supersededCountFromObject(item);
+      const countKey = `${config || ''}:${name}`.toUpperCase();
+      const hasCachedCount = gridSupersededCounts.has(countKey);
+      const cachedCount = gridSupersededCounts.get(countKey);
+      selected.set(`${config || ''}:${name}`.toUpperCase(), {
+        id: String(item && (item.OBID || item.Id) || ''), name,
+        config,
+        status: statusFromGridRow(row, item),
+        supersededCount: itemCount !== null ? Math.max(itemCount, cachedCount || 0) : hasCachedCount ? cachedCount : null
       });
     });
     return [...selected.values()];
@@ -273,26 +398,37 @@ function selectedWorkPackages() {
     return rows;
   }
 
-  function inspectSupersededDocuments(rows) {
-    if (!rows.length) return { verified: true, count: 0, names: [] };
-    let statusFieldFound = false;
+  function inspectSupersededDocuments(rows, wp) {
+    let countFieldFound = wp && wp.supersededCount !== null && wp.supersededCount !== undefined;
     const names = [];
+    let count = Number(countFieldFound ? wp.supersededCount : 0) || 0;
     rows.forEach(row => {
       const id = row.Id || row.OBID || row.id || row.Name || 'Unnamed document';
+      if (isSupersededDocumentRow(row)) {
+        countFieldFound = true;
+        names.push(clean(row.Name || id));
+      }
       Object.entries(row).forEach(([key, value]) => {
-        if (typeof value === 'string' && /supersed|obsolete/i.test(value)) {
-          statusFieldFound = true;
-          if (typeof value === 'string' && /supersed|obsolete/i.test(value)) names.push(clean(row.Name || id));
-        }
         if (/supersed/i.test(key)) {
-          statusFieldFound = true;
-          const positive = value === true || (typeof value === 'number' && value > 0) ||
-            (typeof value === 'string' && value.trim() !== '' && !/^(false|0|no|null|undefined)$/i.test(value.trim()));
-          if (positive) names.push(clean(row.Name || id));
+          countFieldFound = true;
+          const foundCount = positiveCount(value);
+          if (foundCount) {
+            count = Math.max(count, foundCount);
+            names.push(clean(row.Name || id));
+          } else if (typeof value === 'string' && /supersed|obsolete/i.test(value)) {
+            count++;
+            names.push(clean(row.Name || id));
+          }
+        }
+        if (/(state|status|lifecycle)/i.test(key) && typeof value === 'string' && /supersed|obsolete/i.test(value)) {
+          countFieldFound = true;
+          count++;
+          names.push(clean(row.Name || id));
         }
       });
     });
-    return { verified: statusFieldFound, count: new Set(names).size, names: [...new Set(names)] };
+    const uniqueNames = [...new Set(names)];
+    return { verified: Boolean(countFieldFound), count: Math.max(count, uniqueNames.length), names: uniqueNames };
   }
 
   async function resolveAttachedFiles(rows, token, config) {
@@ -335,7 +471,6 @@ function selectedWorkPackages() {
         const { width, height } = page.getSize();
         const margin = Math.max(10, Math.min(24, width * 0.012));
         const fontSize = Math.max(11.55, Math.min(24.15, width * 0.0147));
-
         const textWidth = font.widthOfTextAtSize(label, fontSize);
         const x = Math.max(margin, width - margin - textWidth);
         const y = Math.max(margin, height - margin - fontSize);
@@ -354,21 +489,17 @@ function selectedWorkPackages() {
 
   async function downloadPackageZip(workPackage, token, config) {
     const wp = workPackage.name;
-
     const zip = new JSZip();
     const rows = await listPackageDocuments(wp, token, config);
-    if (!rows.length) throw new Error('No documents were returned for this work package.');
-    const superseded = inspectSupersededDocuments(rows);
-    if (workPackage.supersededCount !== null && workPackage.supersededCount !== undefined) {
-      superseded.count = Math.max(superseded.count, Number(workPackage.supersededCount) || 0);
-      superseded.verified = true;
-    }
-
+    const superseded = inspectSupersededDocuments(rows, workPackage);
     if (!superseded.verified) {
-      throw new Error('WARNING: Could not verify superseded-document status from the SDx document list; no drawings were stamped. Please share a work package known to contain a superseded drawing so the check can be matched to its SDx field.');
+      throw new Error(`WARNING: Could not verify the superseded-drawing count for ${wp}. No drawings were stamped. The SDx work package record did not expose a superseded count, and its document list did not expose a lifecycle status.`);
     }
     if (superseded.count) {
-      throw new Error(`WARNING: Found ${superseded.count} superseded drawing${superseded.count === 1 ? '' : 's'} (${superseded.names.slice(0, 5).join(', ')}${superseded.count > 5 ? ', …' : ''}). No ZIP was created.`);
+      throw new Error(`WARNING: ${wp} has ${superseded.count} superseded drawing${superseded.count === 1 ? '' : 's'}${superseded.names.length ? ` (${superseded.names.slice(0, 5).join(', ')}${superseded.names.length > 5 ? ', …' : ''})` : ''}. No ZIP was created.`);
+    }
+    if (!rows.length) {
+      throw new Error(`No current drawings were returned for ${wp}. The work package has no downloadable current drawings${superseded.verified ? ' and no superseded drawings were reported' : ', and SDx did not provide a superseded-drawing count'}; check the WP document lists in SDx.`);
     }
     setStatus(`Finding attached PDFs for ${wp}…`);
     const fileMap = await resolveAttachedFiles(rows, token, config);
@@ -381,7 +512,7 @@ function selectedWorkPackages() {
       if (!/\.pdf$/i.test(fileName)) continue;
       if (file) pdfs.push({ row, file, fileName });
     }
-    if (!pdfs.length) throw new Error('No attached PDF drawings were found.');
+    if (!pdfs.length) throw new Error(`No attached current PDF drawings were found for ${wp}. The listed documents may have no downloadable PDF file attached.`);
     const used = new Set();
     for (let index = 0; index < pdfs.length; index++) {
       const item = pdfs[index];
@@ -445,7 +576,8 @@ function selectedWorkPackages() {
           setProgress(`Downloaded ${wp.name}_Stamped_Drawings.zip (${count} PDF${count === 1 ? '' : 's'}).`);
           await sleep(900);
         } catch (error) {
-          setProgress(`${error && error.message && error.message.startsWith('WARNING:') ? '⚠ ' : `${wp.name}: `}${error && error.message ? error.message : String(error)}`);
+          const detail = error && error.message ? error.message : String(error);
+          setProgress(`${detail.startsWith('WARNING:') ? '⚠ ' : `${wp.name}: `}${detail}`);
         }
       }
       setStatus(`Finished: ${completed} of ${workPackages.length} work package ZIP${workPackages.length === 1 ? '' : 's'} downloaded.`, completed !== workPackages.length);
@@ -458,7 +590,8 @@ function selectedWorkPackages() {
 
   function updateButton() {
     applyRowHighlights();
-    const onWpResults = Boolean(currentEntityType());
+    refreshGridSupersededCounts();
+    const onWpResults = onWorkPackageResultsPage();
     let button = document.getElementById(BUTTON_ID);
     if (!onWpResults) {
       if (button) button.remove();
