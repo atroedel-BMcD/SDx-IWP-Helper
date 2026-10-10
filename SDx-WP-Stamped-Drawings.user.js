@@ -365,10 +365,10 @@ function selectedWorkPackages() {
     }
 
     if (!superseded.verified) {
-      throw new Error('Could not verify superseded-document status from the SDx document list; no drawings were stamped. Please share a work package known to contain a superseded drawing so the check can be matched to its SDx field.');
+      throw new Error('WARNING: Could not verify superseded-document status from the SDx document list; no drawings were stamped. Please share a work package known to contain a superseded drawing so the check can be matched to its SDx field.');
     }
     if (superseded.count) {
-      throw new Error(`Found ${superseded.count} superseded drawing${superseded.count === 1 ? '' : 's'} (${superseded.names.slice(0, 5).join(', ')}${superseded.count > 5 ? ', …' : ''}). No ZIP was created.`);
+      throw new Error(`WARNING: Found ${superseded.count} superseded drawing${superseded.count === 1 ? '' : 's'} (${superseded.names.slice(0, 5).join(', ')}${superseded.count > 5 ? ', …' : ''}). No ZIP was created.`);
     }
     setStatus(`Finding attached PDFs for ${wp}…`);
     const fileMap = await resolveAttachedFiles(rows, token, config);
