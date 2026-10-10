@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SDX IWP Helper
 // @namespace    https://burnsmcd.com
-// @version      0.6.3
+// @version      0.6.4
 // @description  Stamp drawing ZIPs, flag superseded revisions, and update work package document associations.
 // @match        https://*.intergraphsmartcloud.com/*
 // @grant        none
@@ -18,7 +18,7 @@
   window.__sdxWpStampedDrawingsLoaded = true;
   try { if (window.self !== window.top) return; } catch (_) { return; }
 
-  const VERSION = '0.6.3';
+  const VERSION = '0.6.4';
   const BUTTON_ID = 'sdx-iwp-tools-button';
   const TOOLBAR_ID = 'sdx-iwp-helper-toolbar';
   const MENU_ID = 'sdx-iwp-helper-menu';
@@ -400,6 +400,29 @@
     return onWorkPackageResultsPage() ? selectedWorkPackages() : [detailWorkPackage()].filter(Boolean);
   }
 
+  function sidePanelWorkPackage() {
+    if (!onWorkPackageResultsPage()) return null;
+    const name = clean(document.querySelector('sda-split-screen-menu .split-panel-header__title')?.textContent);
+    if (!name) return null;
+    const row = [...document.querySelectorAll('.k-grid-content-locked tr[data-uid]')]
+      .find(candidate => workPackageNameFromRow(candidate) === name);
+    if (!row) return null;
+    const item = rowData(row);
+    const query = currentEntityType();
+    return {
+      id: clean(item && (item.OBID || item.Id || item.id)),
+      name,
+      config: item && (item.Config || item.SPFConfigUID) || query && query.config && query.config.key || null,
+      status: statusFromGridRow(row, item)
+    };
+  }
+
+  function updateTargetWorkPackages() {
+    if (!onWorkPackageResultsPage()) return [detailWorkPackage()].filter(Boolean);
+    const selected = selectedWorkPackages();
+    return selected.length ? selected : [sidePanelWorkPackage()].filter(Boolean);
+  }
+
   async function waitForUi(check, description, timeout = 20000) {
     const until = Date.now() + timeout;
     while (Date.now() < until) {
@@ -435,6 +458,13 @@
     return [...wizard.querySelectorAll('button')].find(button => clean(button.textContent).toLowerCase() === label.toLowerCase());
   }
 
+  function requiredDocumentsUnlinkButton(wizard) {
+    // This icon only removes selected Required Documents from the Update draft.
+    // The work package Terminate action is outside this dialog and must never be used.
+    return [...wizard.querySelectorAll('.related-items-panel button[title="Terminate"]')]
+      .find(button => button.querySelector('mat-icon[data-mat-icon-name="unlink"]'));
+  }
+
   function revisionChooser() {
     return [...document.querySelectorAll('[role="dialog"]')].find(dialog =>
       /Results\s*:\s*Document Revisions/i.test(dialog.querySelector('h1')?.textContent || ''));
@@ -458,42 +488,52 @@
 
   async function openUpdateWizard(wp) {
     if (onWorkPackageResultsPage()) {
-      const selected = [...document.querySelectorAll(CHECKBOX_SELECTOR)].find(checkbox => {
-        const row = checkbox.closest('tr[data-uid]');
-        return checkbox.checked && row && workPackageNameFromRow(row) === wp.name;
-      });
-      const row = selected?.closest('tr[data-uid]');
-      const grid = row?.closest('.k-grid');
-      const twin = grid && row?.dataset.uid && [...grid.querySelectorAll('.k-grid-content-locked tr[data-uid]')]
-        .find(candidate => candidate.dataset.uid === row.dataset.uid);
-      const nameCell = row?.querySelector('td[id^="locked_datacell_"][id$="_1"]') ||
-        twin?.querySelector('td[id^="locked_datacell_"][id$="_1"]');
+      const findRow = () => [...document.querySelectorAll('.k-grid-content-locked tr[data-uid]')]
+        .find(row => workPackageNameFromRow(row) === wp.name);
+      const row = findRow();
+      const nameCell = row?.querySelector('td[id^="locked_datacell_"][id$="_1"]');
       const nameControl = nameCell?.querySelector('.grid-object__name') || nameCell;
-      if (clean(nameControl?.textContent) !== wp.name) {
-        throw new Error(`Could not find the selected SDx row for ${wp.name}. No update was saved.`);
+      if (!row || clean(nameControl?.textContent) !== wp.name) {
+        throw new Error(`Could not find the SDx results row for ${wp.name}. No update was saved.`);
       }
-      clickUi(nameControl, `${wp.name} results row name`);
-      await waitForUi(() => detailWorkPackage()?.name === wp.name, `${wp.name} side panel`);
+      if (sidePanelWorkPackage()?.name !== wp.name) clickUi(nameControl, `${wp.name} results row name`);
+      await waitForUi(() => sidePanelWorkPackage()?.name === wp.name, `${wp.name} side panel`);
+      const findActionsMenu = () => [...document.querySelectorAll('sda-content-menu .content-menu--open')]
+        .find(menu => clean(menu.querySelector('header.content-header')?.getAttribute('title')) === wp.name);
+      if (!findActionsMenu()) {
+        const action = findRow()?.querySelector('td[id^="locked_datacell_"][id$="_0"] .action-cell-button');
+        clickUi(action, `${wp.name} results row Actions icon`);
+      }
+      const actionsMenu = await waitForUi(findActionsMenu, `${wp.name} Actions menu`);
+      const updateAction = await waitForUi(() => [...actionsMenu.querySelectorAll('mat-tree-node')]
+        .find(node => /^Update(?:…|\.\.\.)$/.test(clean(node.getAttribute('title') || node.textContent))),
+      `${wp.name} Update action`);
+      clickUi(updateAction, 'Update action');
+    } else {
+      const visibleActionIcon = () => [...document.querySelectorAll('image.main-menu-icon')]
+        .find(icon => icon.querySelector('title')?.textContent === 'Actions' &&
+          icon.closest('g.infomap-container')?.querySelector(':scope > title')?.textContent?.includes(wp.name) &&
+          icon.getBoundingClientRect().width > 0);
+      if (!visibleActionIcon()) {
+        clickUi(document.querySelector('[title="Show Info Map"]'), 'Info Map tab');
+      }
+      const findUpdateAction = () => [...document.querySelectorAll('mat-tree-node')]
+        .find(node => clean(node.textContent) === 'Update…' || clean(node.textContent) === 'Update...');
+      if (!findUpdateAction()) {
+        const actionIcon = await waitForUi(visibleActionIcon, 'work package Actions icon');
+        clickUi(actionIcon, 'work package Actions icon');
+      }
+      const updateAction = await waitForUi(findUpdateAction, 'Update action');
+      clickUi(updateAction, 'Update action');
     }
-    const visibleActionIcon = () => [...document.querySelectorAll('image.main-menu-icon')]
-      .find(icon => icon.querySelector('title')?.textContent === 'Actions' &&
-        icon.closest('g.infomap-container')?.querySelector(':scope > title')?.textContent?.includes(wp.name) &&
-        icon.getBoundingClientRect().width > 0);
-    if (!visibleActionIcon()) {
-      clickUi(document.querySelector('[title="Show Info Map"]'), 'Info Map tab');
-    }
-    const findUpdateAction = () => [...document.querySelectorAll('mat-tree-node')]
-      .find(node => clean(node.textContent) === 'Update…' || clean(node.textContent) === 'Update...');
-    if (!findUpdateAction()) {
-      const actionIcon = await waitForUi(visibleActionIcon, 'work package Actions icon');
-      clickUi(actionIcon, 'work package Actions icon');
-    }
-    const updateAction = await waitForUi(findUpdateAction, 'Update action');
-    clickUi(updateAction, 'Update action');
-    return waitForUi(() => {
+    const wizard = await waitForUi(() => {
       const wizard = document.querySelector('sda-edit-obj-modal-view');
       return wizard?.querySelector('input[placeholder="Search Document Revisions"]') ? wizard : null;
     }, 'Update form');
+    if (clean(wizard.querySelector('h1')?.textContent) !== `Update ${wp.name}`) {
+      throw new Error(`SDx opened the wrong work package Update form. No update was saved.`);
+    }
+    return wizard;
   }
 
   async function addCurrentRevision(wizard, name) {
@@ -522,11 +562,11 @@
 
   async function updateSupersededDocuments() {
     if (busy) return;
-    const selected = targetWorkPackages();
+    const selected = updateTargetWorkPackages();
     openPanel();
     document.getElementById(`${PANEL_ID}-log`).replaceChildren();
     if (selected.length !== 1) {
-      setStatus('Select exactly one work package, or open its detail page, to update superseded documents.', true);
+      setStatus('Select exactly one work package, or open its side panel, to update superseded documents.', true);
       return;
     }
     const wp = selected[0];
@@ -562,9 +602,13 @@
         if (!checkbox || checkbox.disabled) throw new Error('A superseded revision cannot be unlinked. The update was canceled.');
         if (!checkbox.checked) clickUi(checkbox, 'superseded revision checkbox');
       }
-      const terminate = wizardButton(wizard, 'Terminate');
-      await waitForUi(() => terminate && !terminate.disabled, 'unlink control');
-      clickUi(terminate, 'unlink control');
+      const checkedRows = wizardRows(wizard).filter(row => row.querySelector('input[type="checkbox"]')?.checked);
+      if (checkedRows.length !== obsolete.length || checkedRows.some(row => !obsolete.includes(row))) {
+        throw new Error('The Update form has other documents selected. The update was canceled.');
+      }
+      const unlink = requiredDocumentsUnlinkButton(wizard);
+      await waitForUi(() => unlink && !unlink.disabled, 'Required Documents unlink control');
+      clickUi(unlink, 'Required Documents unlink control');
       await waitForUi(() => wizardRows(wizard).length === rows.length - obsolete.length,
         'superseded revisions to leave the update draft');
       if (wizardRows(wizard).some(row => /^superseded$/i.test(wizardCell(row, 7)))) {
