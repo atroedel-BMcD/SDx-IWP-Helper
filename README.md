@@ -1,2 +1,77 @@
-# SDx-IWP-Helper
-Tools for helping with SDx IWPs
+# SDX IWP Helper
+
+A Tampermonkey userscript for SDx work packages (IWPs). It highlights packages with superseded documents, downloads stamped PDF drawings as ZIP files, and helps replace superseded document associations with current revisions.
+
+The current userscript version is **0.6.5**. The script is in [SDx-WP-Stamped-Drawings.user.js](SDx-WP-Stamped-Drawings.user.js).
+
+## Install
+
+1. Install and enable the Tampermonkey browser extension.
+2. Open the [userscript installation link](https://raw.githubusercontent.com/atroedel-BMcD/SDx-IWP-Helper/main/SDx-WP-Stamped-Drawings.user.js) in that browser and choose **Install** in Tampermonkey. If the browser displays the source instead, create a new script in Tampermonkey, replace its contents with the file from this repository, and save it.
+3. Sign in to SDx and reload the page. On **Results: General Work Packages**, look for the blue **IWP TOOLS** button in the grid toolbar, near **Export All to Excel**.
+
+The script runs on matching `intergraphsmartcloud.com` pages. It requires access to the SDx session and loads `pdf-lib` and `JSZip` from cdnjs. If your browser or company network blocks those libraries, stamping and ZIP creation will not work.
+
+## Features
+
+| Feature | What it does |
+| --- | --- |
+| Superseded row highlighting | Checks SDx's **Superseded Documents** widget for work packages visible in the results grid. Packages with a count above zero are yellow when **Planned** and red when **Active** or **Executed**, by default. |
+| Stamp and download | Creates a separate ZIP for each selected work package. Each attached PDF is stamped in red at the upper right of every page with `WP # <work package name> CONTROLLED`. The stamp has no gray border lines. |
+| Superseded download guard | Rechecks the selected package's superseded count before stamping. By default, any superseded document blocks that package's ZIP and displays a warning. |
+| Per-download override | An unchecked option in the download dialog can include superseded versions for that run. Those PDF pages also receive a large, diagonal, translucent red **SUPERSEDED** mark. The option must be selected again for every download. |
+| Update superseded documents | For one package at a time, opens SDx's Update form, removes its superseded Required Documents associations, finds and adds the matching current revisions, and asks for confirmation before saving. |
+| Color controls | Turn each status highlight on or off, choose its color, or reset the default colors from the **IWP TOOLS** menu. These preferences are stored in this browser. |
+
+Only documents with an attached PDF file are included in stamped ZIPs. Other file types are skipped. Stamping changes the downloaded copies; it does not replace files in SDx.
+
+## Download stamped drawings
+
+1. Open **Results: General Work Packages** in SDx.
+2. Check the box beside each work package you want. You can select more than one.
+3. Click **IWP TOOLS** → **Stamp & download selected WPs**.
+4. Review the number of selected packages. Leave **Include superseded PDF revisions in this download** unchecked for the normal guarded download, then click **Download stamped drawings**.
+5. If you intentionally need superseded versions, check the override box and use **Include superseded and download**. Read the warning each time; the choice is never saved.
+
+The helper downloads one ZIP per work package, named `<work package name>_Stamped_Drawings.zip`. An override ZIP adds `_Including_Superseded` to the name. If one package fails, the helper reports that package's error and continues with the other selected packages. A package with superseded documents produces **no ZIP** unless the override was selected. If SDx cannot verify the superseded count, the package is blocked.
+
+For an override download, the helper requires a downloadable PDF for every superseded document SDx reports. If any is missing, it stops that package without creating a ZIP. A package with no attached PDF drawings also produces no ZIP.
+
+## Update superseded documents
+
+1. In **Results: General Work Packages**, check **exactly one** work package, or open that package's side panel with no other package checked.
+2. Click **IWP TOOLS** → **Update superseded documents**.
+3. If the side panel is collapsed, the helper selects the package in the results grid and expands the panel. It confirms the panel shows the intended package before opening its **Update…** action.
+4. The helper compares the Update form's superseded Required Documents with the **Superseded Documents** count, unlinks those associations in the draft, and searches SDx for one current revision of each document.
+5. Review the confirmation listing the documents. Choose **OK** to save the work package update in SDx, or **Cancel** to discard the draft.
+6. After saving, the helper checks that SDx reports zero superseded documents. Review any error or warning it displays.
+
+The unlink control used here is the chain-break icon **inside the Update form's Required Documents grid**. The separate **Terminate** action in the work package Actions menu is not part of this workflow.
+
+The helper stops before saving if the superseded counts disagree, a current revision cannot be uniquely identified, or the draft changes unexpectedly. If SDx reports superseded documents after a save, inspect the package in SDx; the helper will report that result.
+
+## Change the row colors
+
+Open **IWP TOOLS** and use the **Highlight WPs with superseded documents** controls. There is a separate on/off checkbox and color picker for **Planned**, **Active**, and **Executed**. **Reset colors** restores the default color values. Settings are saved locally in the current browser.
+
+The grid scans visible work packages in the background and caches counts for up to five minutes. An unknown or unavailable count will not color a row; download still performs a fresh count check before stamping.
+
+## Updates and versioning
+
+Tampermonkey uses the script's `@updateURL`, `@downloadURL`, and `@version` metadata to check this repository for new versions. Its check schedule is controlled by Tampermonkey, so a new commit may not appear immediately. To update sooner, use Tampermonkey's **Check for userscript updates** command, then reload SDx. Confirm the installed version in Tampermonkey or the **IWP TOOLS** menu.
+
+When publishing a code change, increment both the header `@version` and the `VERSION` constant in the script, then commit the updated file to `main`. Use patch versions for fixes (for example, `0.6.5` → `0.6.6`) and minor versions for new functionality. A README-only change does not require a userscript version change.
+
+## Troubleshooting
+
+| Message or symptom | What to check |
+| --- | --- |
+| **IWP TOOLS** is missing | Verify the userscript is enabled, reload SDx, and open the Work Packages results page. Confirm you are signed in. |
+| **No selected work packages** | Check one or more boxes in the results grid before downloading. For an update, check exactly one package or open its side panel with no boxes checked. |
+| **Could not read the SDx session token** | Reload SDx, sign in if needed, and try again. |
+| Superseded warning, no ZIP | This is the default safeguard. Update the package's associations, or explicitly select the override in the download dialog for that run. |
+| **No attached PDF drawings** | Check that the package's documents have downloadable PDF attachments in SDx. Non-PDF files are not stamped. |
+| Update stops before saving | Compare the package's **Superseded Documents** widget with its Update form. The helper requires matching counts and one current revision per superseded document. |
+| Tampermonkey does not show a new release | Run **Check for userscript updates** and confirm that the repository's script header has a higher `@version` than your installed copy. |
+
+The helper's status panel shows progress and package-specific errors. Closing that panel only hides the status; it does not cancel an operation already in progress.
