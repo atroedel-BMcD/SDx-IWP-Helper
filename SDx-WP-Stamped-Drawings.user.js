@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SDX IWP Helper
 // @namespace    https://burnsmcd.com
-// @version      0.6.0
+// @version      0.6.1
 // @description  Stamp drawing ZIPs, flag superseded revisions, and update work package document associations.
 // @match        https://*.intergraphsmartcloud.com/*
 // @grant        none
@@ -468,7 +468,9 @@
       await waitForUi(() => detailWorkPackage()?.name === wp.name, `${wp.name} detail page`);
     }
     const visibleActionIcon = () => [...document.querySelectorAll('image.main-menu-icon')]
-      .find(icon => icon.querySelector('title')?.textContent === 'Actions' && icon.getBoundingClientRect().width > 0);
+      .find(icon => icon.querySelector('title')?.textContent === 'Actions' &&
+        icon.closest('g.infomap-container')?.querySelector(':scope > title')?.textContent?.includes(wp.name) &&
+        icon.getBoundingClientRect().width > 0);
     if (!visibleActionIcon()) {
       clickUi(document.querySelector('[title="Show Info Map"]'), 'Info Map tab');
     }
@@ -520,6 +522,7 @@
       return;
     }
     const wp = selected[0];
+    if (wp.id) workPackageIds.set(packageKey(wp.name, wp.config), wp.id);
     const token = tokenFromSession();
     if (!token) {
       setStatus('Could not read the SDx session token. Reload SDx and try again.', true);
@@ -618,7 +621,7 @@
     panel = document.createElement('div');
     panel.id = PANEL_ID;
     panel.style.cssText = 'position:fixed;right:20px;bottom:76px;z-index:2147483647;width:390px;max-height:65vh;overflow:auto;background:#fff;color:#222;border:1px solid #bbb;border-radius:8px;box-shadow:0 4px 18px #0003;padding:14px;font:14px/1.4 Arial,sans-serif;';
-    panel.innerHTML = `<div style="display:flex;justify-content:space-between;align-items:center;font-weight:700;font-size:16px"><span>Stamped drawing ZIPs</span><button type="button" aria-label="Close" style="border:0;background:transparent;font-size:20px;cursor:pointer">×</button></div><div id="${PANEL_ID}-status" style="margin:8px 0">Ready.</div><div id="${PANEL_ID}-log"></div>`;
+    panel.innerHTML = `<div style="display:flex;justify-content:space-between;align-items:center;font-weight:700;font-size:16px"><span>IWP tools</span><button type="button" aria-label="Close" style="border:0;background:transparent;font-size:20px;cursor:pointer">×</button></div><div id="${PANEL_ID}-status" style="margin:8px 0">Ready.</div><div id="${PANEL_ID}-log"></div>`;
     panel.querySelector('button').addEventListener('click', () => panel.remove());
     document.body.appendChild(panel);
     return panel;
