@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SDX IWP Helper
 // @namespace    https://burnsmcd.com
-// @version      0.6.1
+// @version      0.6.2
 // @description  Stamp drawing ZIPs, flag superseded revisions, and update work package document associations.
 // @match        https://*.intergraphsmartcloud.com/*
 // @grant        none
@@ -549,18 +549,7 @@
       const names = [...new Set(obsolete.map(row => wizardCell(row, 2)))];
       if (names.some(name => !name)) throw new Error('A superseded revision has no document name. The update was canceled.');
       setProgress(`${wp.name}: found ${obsolete.length} superseded revision${obsolete.length === 1 ? '' : 's'} in the Update form.`);
-      for (const name of names) {
-        const linkedCurrent = wizardRows(wizard).filter(row => wizardCell(row, 2) === name && /^current$/i.test(wizardCell(row, 7)));
-        if (linkedCurrent.length > 1) throw new Error(`${name}: multiple current revisions are already linked. The update was canceled.`);
-        if (!linkedCurrent.length) {
-          setStatus(`Finding current revision of ${name}…`);
-          await addCurrentRevision(wizard, name);
-        }
-        setProgress(`${name}: current revision found.`);
-      }
-      const draftObsolete = wizardRows(wizard).filter(row => /^superseded$/i.test(wizardCell(row, 7)));
-      if (draftObsolete.length !== report.count) throw new Error('The required documents changed during preparation. The update was canceled.');
-      for (const row of draftObsolete) {
+      for (const row of obsolete) {
         const checkbox = row.querySelector('input[type="checkbox"]');
         if (!checkbox || checkbox.disabled) throw new Error('A superseded revision cannot be unlinked. The update was canceled.');
         if (!checkbox.checked) clickUi(checkbox, 'superseded revision checkbox');
@@ -568,11 +557,25 @@
       const terminate = wizardButton(wizard, 'Terminate');
       await waitForUi(() => terminate && !terminate.disabled, 'unlink control');
       clickUi(terminate, 'unlink control');
-      await waitForUi(() => wizardRows(wizard).length === rows.length - obsolete.length + names.filter(name =>
-        !rows.some(row => wizardCell(row, 2) === name && /^current$/i.test(wizardCell(row, 7)))).length,
-      'updated required documents list');
+      await waitForUi(() => wizardRows(wizard).length === rows.length - obsolete.length,
+        'superseded revisions to leave the update draft');
       if (wizardRows(wizard).some(row => /^superseded$/i.test(wizardCell(row, 7)))) {
         throw new Error('A superseded revision remains in the draft. The update was canceled.');
+      }
+      let added = 0;
+      for (const name of names) {
+        const linkedCurrent = wizardRows(wizard).filter(row => wizardCell(row, 2) === name && /^current$/i.test(wizardCell(row, 7)));
+        if (linkedCurrent.length > 1) throw new Error(`${name}: multiple current revisions are already linked. The update was canceled.`);
+        if (!linkedCurrent.length) {
+          setStatus(`Finding current revision of ${name}…`);
+          await addCurrentRevision(wizard, name);
+          added++;
+        }
+        setProgress(`${name}: current revision found.`);
+      }
+      if (wizardRows(wizard).length !== rows.length - obsolete.length + added ||
+          names.some(name => wizardRows(wizard).filter(row => wizardCell(row, 2) === name && /^current$/i.test(wizardCell(row, 7))).length !== 1)) {
+        throw new Error('The required documents draft changed unexpectedly. The update was canceled.');
       }
       const accepted = window.confirm(`Update ${wp.name}?\n\n${obsolete.length} superseded revision${obsolete.length === 1 ? '' : 's'} will be unlinked and the current revision of each document will be associated.\n\n${names.join('\n')}\n\nSave this work package update in SDx?`);
       if (!accepted) throw new Error('Canceled. No work package update was saved.');
