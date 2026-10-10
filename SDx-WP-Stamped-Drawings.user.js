@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         SDx WP Stamped Drawing ZIPs
+// @name         SDX IWP Helper
 // @namespace    https://burnsmcd.com
-// @version      0.2.1
+// @version      0.2.2
 // @description  Create one ZIP per selected SDx work package with its PDF drawings stamped on every page.
 // @match        https://*.intergraphsmartcloud.com/*
 // @grant        none
