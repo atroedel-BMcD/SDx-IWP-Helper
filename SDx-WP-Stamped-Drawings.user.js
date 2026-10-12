@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SDX IWP Helper
 // @namespace    https://burnsmcd.com
-// @version      0.6.5
+// @version      0.6.6
 // @description  Stamp drawing ZIPs, flag superseded revisions, and update work package document associations.
 // @match        https://*.intergraphsmartcloud.com/*
 // @grant        none
@@ -18,7 +18,7 @@
   window.__sdxWpStampedDrawingsLoaded = true;
   try { if (window.self !== window.top) return; } catch (_) { return; }
 
-  const VERSION = '0.6.5';
+  const VERSION = '0.6.6';
   const BUTTON_ID = 'sdx-iwp-tools-button';
   const TOOLBAR_ID = 'sdx-iwp-helper-toolbar';
   const MENU_ID = 'sdx-iwp-helper-menu';
@@ -800,7 +800,7 @@
     try {
       superseded = await readSupersededWidget(wp, token, config, true);
     } catch (error) {
-      throw new Error(`WARNING: Could not verify SDx's Superseded Documents count for ${wp}: ${error && error.message || error}. No drawings were stamped or downloaded.`);
+      throw new Error(`Could not verify SDx's Superseded Documents count for ${wp}: ${error && error.message || error}. No drawings were stamped or downloaded.`);
     }
     if (superseded.count && mode === 'block') {
       throw new Error(`WARNING: ${wp} has ${superseded.count} superseded document${superseded.count === 1 ? '' : 's'}${superseded.names.length ? ` (${superseded.names.slice(0, 5).join(', ')}${superseded.names.length > 5 ? ', …' : ''})` : ''}. No ZIP was created.`);
@@ -870,7 +870,7 @@
     return { count: pdfs.length, supersededCount: pdfs.filter(item => item.isSuperseded).length, filename };
   }
 
-  async function run(mode = 'block') {
+  async function run(mode = 'block', requestedWorkPackages = null) {
     if (busy) return;
     const query = currentEntityType();
     if (!query) {
@@ -878,7 +878,7 @@
       setStatus('Open the Work Packages results list, select one or more WP rows, then run this helper.', true);
       return;
     }
-    const workPackages = targetWorkPackages();
+    const workPackages = requestedWorkPackages || targetWorkPackages();
     openPanel();
     document.getElementById(`${PANEL_ID}-log`).replaceChildren();
     if (!workPackages.length) {
@@ -924,10 +924,16 @@
     document.getElementById(DOWNLOAD_DIALOG_ID)?.remove();
   }
 
-  function openDownloadDialog() {
-    if (busy) return;
+  async function openDownloadDialog() {
+    if (busy || document.getElementById(DOWNLOAD_DIALOG_ID)) return;
     closeMenu();
-    closeDownloadDialog();
+    const query = currentEntityType();
+    const workPackages = targetWorkPackages();
+    const token = tokenFromSession();
+    if (!query || !workPackages.length || !token) {
+      run('block', workPackages);
+      return;
+    }
     const overlay = document.createElement('div');
     overlay.id = DOWNLOAD_DIALOG_ID;
     overlay.style.cssText = 'position:fixed;inset:0;z-index:2147483647;display:flex;align-items:center;justify-content:center;background:#0008;padding:16px;font:13px/1.4 Arial,sans-serif;';
@@ -939,21 +945,10 @@
     const heading = document.createElement('h2');
     heading.textContent = 'Download stamped drawings';
     heading.style.cssText = 'font:700 18px Arial,sans-serif;margin:0 0 12px;';
-    const count = targetWorkPackages().length;
+    const count = workPackages.length;
     const description = document.createElement('p');
-    description.textContent = `${count} work package${count === 1 ? '' : 's'} selected. A separate ZIP will be downloaded for each package. By default, a package with any superseded documents is blocked.`;
+    description.textContent = `Checking SDx Superseded Documents for ${count} selected work package${count === 1 ? '' : 's'}…`;
     description.style.cssText = 'margin:0 0 14px;';
-    const label = document.createElement('label');
-    label.style.cssText = 'display:flex;gap:9px;align-items:flex-start;padding:11px;background:#fff2df;border:1px solid #d69b56;border-radius:3px;cursor:pointer;';
-    const override = document.createElement('input');
-    override.type = 'checkbox';
-    override.style.cssText = 'margin-top:2px;';
-    const warning = document.createElement('span');
-    warning.textContent = 'Include superseded PDF revisions in this download. They will be marked SUPERSEDED across the page. I understand these are out-of-date drawings.';
-    label.append(override, warning);
-    const note = document.createElement('p');
-    note.textContent = 'This selection starts unchecked every time you open this dialog.';
-    note.style.cssText = 'color:#555;font-size:11px;margin:8px 0 16px;';
     const actions = document.createElement('div');
     actions.style.cssText = 'display:flex;justify-content:flex-end;gap:8px;';
     const cancel = document.createElement('button');
@@ -964,21 +959,66 @@
     const confirm = document.createElement('button');
     confirm.type = 'button';
     confirm.textContent = 'Download stamped drawings';
+    confirm.disabled = true;
     confirm.style.cssText = 'border:1px solid #1d64b7;border-radius:3px;background:#2b79d7;color:white;padding:8px 12px;font-weight:700;cursor:pointer;';
-    override.addEventListener('change', () => {
-      confirm.textContent = override.checked ? 'Include superseded and download' : 'Download stamped drawings';
-    });
+    let override = null;
     confirm.addEventListener('click', () => {
-      const mode = override.checked ? 'all' : 'block';
+      const mode = override?.checked ? 'all' : 'block';
       closeDownloadDialog();
-      run(mode);
+      run(mode, workPackages);
     });
     actions.append(cancel, confirm);
-    dialog.append(heading, description, label, note, actions);
+    dialog.append(heading, description, actions);
     overlay.appendChild(dialog);
     overlay.addEventListener('pointerdown', event => { if (event.target === overlay) closeDownloadDialog(); });
     document.body.appendChild(overlay);
-    override.focus();
+    cancel.focus();
+
+    const superseded = [];
+    try {
+      for (const wp of workPackages) {
+        if (!overlay.isConnected) return;
+        description.textContent = `Checking SDx Superseded Documents for ${wp.name}…`;
+        if (wp.id) workPackageIds.set(packageKey(wp.name, wp.config), wp.id);
+        let report;
+        try {
+          report = await readSupersededWidget(wp.name, token, wp.config || query.config?.key || null, true);
+        } catch (error) {
+          throw new Error(`Could not verify the Superseded Documents count for ${wp.name}: ${error?.message || error}. No drawings were downloaded.`);
+        }
+        if (report.count > 0) superseded.push({ name: wp.name, count: report.count });
+      }
+      if (!overlay.isConnected) return;
+      description.textContent = `${count} work package${count === 1 ? '' : 's'} selected. A separate ZIP will be downloaded for each package.`;
+      if (superseded.length) {
+        const warning = document.createElement('p');
+        warning.textContent = `Superseded documents found: ${superseded.map(item => `${item.name} (${item.count})`).join('; ')}. These packages are blocked unless you choose the override below.`;
+        warning.style.cssText = 'padding:10px;margin:0 0 10px;background:#fff2df;border:1px solid #d69b56;border-radius:3px;color:#7c2d12;';
+        const label = document.createElement('label');
+        label.style.cssText = 'display:flex;gap:9px;align-items:flex-start;padding:11px;background:#fff2df;border:1px solid #d69b56;border-radius:3px;cursor:pointer;';
+        override = document.createElement('input');
+        override.type = 'checkbox';
+        override.style.cssText = 'margin-top:2px;';
+        const text = document.createElement('span');
+        text.textContent = 'Include superseded PDF revisions for these packages. They will be marked SUPERSEDED across the page. I understand these are out-of-date drawings.';
+        label.append(override, text);
+        const note = document.createElement('p');
+        note.textContent = 'This selection starts unchecked every time you open this dialog.';
+        note.style.cssText = 'color:#555;font-size:11px;margin:8px 0 16px;';
+        override.addEventListener('change', () => {
+          confirm.textContent = override.checked ? 'Include superseded and download' : 'Download stamped drawings';
+        });
+        dialog.insertBefore(warning, actions);
+        dialog.insertBefore(label, actions);
+        dialog.insertBefore(note, actions);
+        override.focus();
+      }
+      confirm.disabled = false;
+    } catch (error) {
+      if (!overlay.isConnected) return;
+      description.textContent = error?.message || String(error);
+      description.style.color = '#a61b1b';
+    }
   }
 
   function positionMenu() {

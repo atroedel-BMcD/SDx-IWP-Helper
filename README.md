@@ -2,7 +2,7 @@
 
 A Tampermonkey userscript for SDx work packages (IWPs). It highlights packages with superseded documents, downloads stamped PDF drawings as ZIP files, and helps replace superseded document associations with current revisions.
 
-The current userscript version is **0.6.5**. The script is in [SDx-WP-Stamped-Drawings.user.js](SDx-WP-Stamped-Drawings.user.js).
+The current userscript version is **0.6.6**. The script is in [SDx-WP-Stamped-Drawings.user.js](SDx-WP-Stamped-Drawings.user.js).
 
 ## Install
 
@@ -19,7 +19,7 @@ The script runs on matching `intergraphsmartcloud.com` pages. It requires access
 | Superseded row highlighting | Checks SDx's **Superseded Documents** widget for work packages visible in the results grid. Packages with a count above zero are yellow when **Planned** and red when **Active** or **Executed**, by default. |
 | Stamp and download | Creates a separate ZIP for each selected work package. Each attached PDF is stamped in red at the upper right of every page with `WP # <work package name> CONTROLLED`. The stamp has no gray border lines. |
 | Superseded download guard | Rechecks the selected package's superseded count before stamping. By default, any superseded document blocks that package's ZIP and displays a warning. |
-| Per-download override | An unchecked option in the download dialog can include superseded versions for that run. Those PDF pages also receive a large, diagonal, translucent red **SUPERSEDED** mark. The option must be selected again for every download. |
+| Per-download override | The download dialog shows this unchecked option only when SDx identifies superseded documents in a selected package. It names the affected packages. An override includes their superseded versions for that run, with a large, diagonal, translucent red **SUPERSEDED** mark on those PDF pages. The option must be selected again for every download. |
 | Update superseded documents | For one package at a time, opens SDx's Update form, removes its superseded Required Documents associations, finds and adds the matching current revisions, and asks for confirmation before saving. |
 | Color controls | Turn each status highlight on or off, choose its color, or reset the default colors from the **IWP TOOLS** menu. These preferences are stored in this browser. |
 
@@ -30,8 +30,8 @@ Only documents with an attached PDF file are included in stamped ZIPs. Other fil
 1. Open **Results: General Work Packages** in SDx.
 2. Check the box beside each work package you want. You can select more than one.
 3. Click **IWP TOOLS** → **Stamp & download selected WPs**.
-4. Review the number of selected packages. Leave **Include superseded PDF revisions in this download** unchecked for the normal guarded download, then click **Download stamped drawings**.
-5. If you intentionally need superseded versions, check the override box and use **Include superseded and download**. Read the warning each time; the choice is never saved.
+4. Wait while the helper checks the selected packages' **Superseded Documents** counts. If none have superseded documents, the dialog shows no warning or override; click **Download stamped drawings**.
+5. If SDx finds superseded documents, the dialog names the affected packages and shows an unchecked override. Leave it unchecked to download only eligible packages, or check it and click **Include superseded and download** if you intentionally need superseded versions. The choice is never saved.
 
 The helper downloads one ZIP per work package, named `<work package name>_Stamped_Drawings.zip`. An override ZIP adds `_Including_Superseded` to the name. If one package fails, the helper reports that package's error and continues with the other selected packages. A package with superseded documents produces **no ZIP** unless the override was selected. If SDx cannot verify the superseded count, the package is blocked.
 
@@ -60,7 +60,7 @@ The grid scans visible work packages in the background and caches counts for up 
 
 Tampermonkey uses the script's `@updateURL`, `@downloadURL`, and `@version` metadata to check this repository for new versions. Its check schedule is controlled by Tampermonkey, so a new commit may not appear immediately. To update sooner, use Tampermonkey's **Check for userscript updates** command, then reload SDx. Confirm the installed version in Tampermonkey or the **IWP TOOLS** menu.
 
-When publishing a code change, increment both the header `@version` and the `VERSION` constant in the script, then commit the updated file to `main`. Use patch versions for fixes (for example, `0.6.5` → `0.6.6`) and minor versions for new functionality. A README-only change does not require a userscript version change.
+When publishing a code change, increment both the header `@version` and the `VERSION` constant in the script, then commit the updated file to `main`. Use patch versions for fixes (for example, `0.6.6` → `0.6.7`) and minor versions for new functionality. A README-only change does not require a userscript version change.
 
 ## Troubleshooting
 
