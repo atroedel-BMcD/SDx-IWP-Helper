@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SDX IWP Helper
 // @namespace    https://burnsmcd.com
-// @version      0.6.6
+// @version      0.6.7
 // @description  Stamp drawing ZIPs, flag superseded revisions, and update work package document associations.
 // @match        https://*.intergraphsmartcloud.com/*
 // @grant        none
@@ -18,7 +18,7 @@
   window.__sdxWpStampedDrawingsLoaded = true;
   try { if (window.self !== window.top) return; } catch (_) { return; }
 
-  const VERSION = '0.6.6';
+  const VERSION = '0.6.7';
   const BUTTON_ID = 'sdx-iwp-tools-button';
   const TOOLBAR_ID = 'sdx-iwp-helper-toolbar';
   const MENU_ID = 'sdx-iwp-helper-menu';
@@ -792,6 +792,119 @@
     });
   }
 
+  function documentField(row, names) {
+    const wanted = new Set(names.map(name => name.toLowerCase().replace(/[^a-z0-9]/g, '')));
+    const key = Object.keys(row || {}).find(name => wanted.has(name.toLowerCase().replace(/[^a-z0-9]/g, '')));
+    return key ? clean(row[key]) : '';
+  }
+
+  function wrapPdfText(text, font, size, maxWidth, maxLines = 2) {
+    const words = clean(text).split(' ').filter(Boolean);
+    const lines = [];
+    let line = '';
+    for (const word of words) {
+      const candidate = line ? `${line} ${word}` : word;
+      if (font.widthOfTextAtSize(candidate, size) <= maxWidth) {
+        line = candidate;
+      } else {
+        if (line) lines.push(line);
+        line = word;
+      }
+    }
+    if (line) lines.push(line);
+    if (lines.length > maxLines) {
+      lines.length = maxLines;
+      let last = lines[maxLines - 1];
+      while (last && font.widthOfTextAtSize(`${last}…`, size) > maxWidth) last = last.slice(0, -1);
+      lines[maxLines - 1] = `${last.trimEnd()}…`;
+    }
+    return lines;
+  }
+
+  async function createControlledDrawingList(workPackage, pdfs) {
+    const { PDFDocument, StandardFonts, rgb, degrees } = PDFLib;
+    const pdf = await PDFDocument.create();
+    const regular = await pdf.embedFont(StandardFonts.Helvetica);
+    const bold = await pdf.embedFont(StandardFonts.HelveticaBold);
+    const pageWidth = 1224; // 17 in at 72 points per inch
+    const pageHeight = 792; // 11 in at 72 points per inch
+    const bandWidth = 46;
+    const rightNoteWidth = 24;
+    const tableLeft = 56;
+    const tableRight = pageWidth - rightNoteWidth - 12;
+    const tableTop = pageHeight - 28;
+    const headerHeight = 34;
+    const rowHeight = 23;
+    const tableBottom = 34;
+    const rowsPerPage = Math.floor((tableTop - headerHeight - tableBottom) / rowHeight);
+    const altWidth = (tableRight - tableLeft) * 0.39;
+    const titleWidth = (tableRight - tableLeft) * 0.49;
+    const columns = [tableLeft, tableLeft + altWidth, tableLeft + altWidth + titleWidth, tableRight];
+    const blue = rgb(0.169, 0.475, 0.843); // #2b79d7, matching the helper's SDx blue controls
+    const blueLight = rgb(0.86, 0.92, 0.98);
+    const black = rgb(0.08, 0.08, 0.08);
+    const white = rgb(1, 1, 1);
+    const items = pdfs.map(item => {
+      const row = item.row || {};
+      const fallback = clean(item.fileName).replace(/\.pdf$/i, '');
+      return {
+        alt: documentField(row, ['Alt Doc Name', 'Alt_Doc_Name', 'AltDocName', 'Alternate Document Name']) || fallback,
+        title: documentField(row, ['Drawing Title', 'Drawing_Title', 'Title', 'Description']),
+        rev: documentField(row, ['Rev', 'Doc_Rev', 'Revision'])
+      };
+    });
+    const pageCount = Math.max(1, Math.ceil(items.length / rowsPerPage));
+
+    for (let pageIndex = 0; pageIndex < pageCount; pageIndex++) {
+      const page = pdf.addPage([pageWidth, pageHeight]);
+      page.drawRectangle({ x: 0, y: 0, width: bandWidth, height: pageHeight, color: blue });
+      page.drawText(`CONTROLLED DRAWING LIST: ${clean(workPackage)}`, {
+        x: 17, y: pageHeight / 2 - bold.widthOfTextAtSize(`CONTROLLED DRAWING LIST: ${clean(workPackage)}`, 13) / 2,
+        size: 13, font: bold, color: white, rotate: degrees(90)
+      });
+      page.drawRectangle({ x: pageWidth - rightNoteWidth, y: 0, width: rightNoteWidth, height: pageHeight, color: blueLight });
+      page.drawText('PRIOR TO APPROVAL SIGNATURE, THIS LIST MUST BE VERIFIED AGAINST THE LATEST DRAWING REV.', {
+        x: pageWidth - rightNoteWidth + 7, y: 60, size: 8.5, font: bold, color: blue, rotate: degrees(90)
+      });
+
+      const headerBottom = tableTop - headerHeight;
+      const start = pageIndex * rowsPerPage;
+      const pageItems = items.slice(start, start + rowsPerPage);
+      const pageTableBottom = headerBottom - pageItems.length * rowHeight;
+      page.drawRectangle({ x: tableLeft, y: headerBottom, width: tableRight - tableLeft, height: headerHeight, color: blueLight });
+      for (const x of columns) page.drawLine({ start: { x, y: pageTableBottom }, end: { x, y: tableTop }, thickness: 0.9, color: black });
+      page.drawLine({ start: { x: tableLeft, y: tableTop }, end: { x: tableRight, y: tableTop }, thickness: 1.1, color: black });
+      page.drawLine({ start: { x: tableLeft, y: headerBottom }, end: { x: tableRight, y: headerBottom }, thickness: 1.1, color: black });
+      const headings = ['ALT DOC NAME', 'DRAWING TITLE', 'REV'];
+      headings.forEach((heading, i) => page.drawText(heading, {
+        x: columns[i] + 7, y: headerBottom + (headerHeight - 10) / 2,
+        size: 10, font: bold, color: blue
+      }));
+
+      pageItems.forEach((item, rowIndex) => {
+        const yTop = headerBottom - rowIndex * rowHeight;
+        const yBottom = yTop - rowHeight;
+        page.drawLine({ start: { x: tableLeft, y: yBottom }, end: { x: tableRight, y: yBottom }, thickness: 0.65, color: black });
+        const textY = yBottom + 7;
+        const altSize = Math.min(9.5, Math.max(6.5, 9.5 * (altWidth - 14) / Math.max(altWidth - 14, bold.widthOfTextAtSize(item.alt, 9.5))));
+        const revSize = Math.min(9.5, Math.max(6.5, 9.5 * (columns[3] - columns[2] - 14) / Math.max(columns[3] - columns[2] - 14, regular.widthOfTextAtSize(item.rev, 9.5))));
+        page.drawText(item.alt, { x: columns[0] + 7, y: textY, size: altSize, font: regular, color: black });
+        const titleLines = wrapPdfText(item.title, regular, 8.5, titleWidth - 14, 2);
+        const titleStartY = yBottom + (rowHeight - titleLines.length * 9.5) / 2 + 2;
+        titleLines.forEach((line, lineIndex) => page.drawText(line, {
+          x: columns[1] + 7, y: titleStartY + (titleLines.length - lineIndex - 1) * 9.5,
+          size: 8.5, font: regular, color: black
+        }));
+        page.drawText(item.rev, { x: columns[2] + 7, y: textY, size: revSize, font: regular, color: black });
+      });
+      page.drawLine({ start: { x: tableLeft, y: pageTableBottom }, end: { x: tableRight, y: pageTableBottom }, thickness: 1.1, color: black });
+      page.drawText(`PAGE ${pageIndex + 1} OF ${pageCount}`, {
+        x: tableRight - 92, y: 17, size: 8, font: regular, color: black
+      });
+    }
+    return pdf.save();
+  }
+
   async function downloadPackageZip(workPackage, token, config, mode) {
     const wp = workPackage.name;
     if (workPackage.id) workPackageIds.set(packageKey(wp, config), workPackage.id);
@@ -855,6 +968,9 @@
       used.add(name.toLowerCase());
       zip.file(name, stamped);
     }
+    setStatus(`Creating controlled drawing list for ${wp}…`);
+    const drawingList = await createControlledDrawingList(wp, pdfs);
+    zip.file(`${safeFilename(wp)}_Controlled_Drawing_List.pdf`, drawingList);
     setStatus(`Building ZIP for ${wp}…`);
     const blob = await zip.generateAsync({ type: 'blob', compression: 'DEFLATE', compressionOptions: { level: 5 } });
     const url = URL.createObjectURL(blob);
