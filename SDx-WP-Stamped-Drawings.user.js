@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SDX IWP Helper
 // @namespace    https://burnsmcd.com
-// @version      0.7.0
+// @version      0.7.1
 // @description  Associate drawing lists with existing work packages, stamp drawing ZIPs, flag superseded revisions, and update document associations.
 // @match        https://*.intergraphsmartcloud.com/*
 // @grant        none
@@ -18,7 +18,7 @@
   window.__sdxWpStampedDrawingsLoaded = true;
   try { if (window.self !== window.top) return; } catch (_) { return; }
 
-  const VERSION = '0.7.0';
+  const VERSION = '0.7.1';
   const BUTTON_ID = 'sdx-iwp-tools-button';
   const TOOLBAR_ID = 'sdx-iwp-helper-toolbar';
   const MENU_ID = 'sdx-iwp-helper-menu';
@@ -455,6 +455,17 @@
     return [...wizard.querySelectorAll('.related-items-panel tr[role="row"][data-kendo-grid-item-index]')];
   }
 
+  async function waitForRequiredDocumentsLoaded(wizard, description) {
+    await waitForUi(() => {
+      const tabs = [...wizard.querySelectorAll('[role="tab"], .mat-mdc-tab')];
+      const requiredTab = tabs.find(tab => /required documents/i.test(clean(tab.textContent)));
+      if (!requiredTab) return null;
+      const count = clean(requiredTab.textContent).match(/required documents\s*(\d+)/i);
+      if (count && Number(count[1]) === 0) return true;
+      return wizardRows(wizard).length ? true : null;
+    }, description);
+  }
+
   function wizardCell(row, index) {
     return clean(row.querySelector(`td[data-kendo-grid-column-index="${index}"]`)?.textContent);
   }
@@ -798,11 +809,7 @@
         try {
           setStatus(`Opening ${group.name}…`);
           wizard = await openUpdateWizard(group);
-          await waitForUi(() => {
-            const panel = wizard.querySelector('.related-items-panel');
-            const grid = panel && panel.querySelector('.k-grid-content, .k-grid-content-locked');
-            return grid && !panel.querySelector('.k-loading-mask') ? grid : null;
-          }, `${group.name} Required Documents grid`);
+          await waitForRequiredDocumentsLoaded(wizard, `${group.name} Required Documents list`);
           const toAdd = [];
           const alreadyLinked = [];
           for (const altDocName of group.altDocNames) {
@@ -1439,14 +1446,12 @@
     menu.appendChild(download);
     const bulk = document.createElement('button');
     bulk.type = 'button';
-    bulk.textContent = 'Build drawing associations from CSV';
+    bulk.textContent = 'Bulk IWP Drawing Association';
     bulk.style.cssText = 'display:flex!important;box-sizing:border-box!important;width:100%!important;height:auto!important;min-height:44px!important;align-items:center;justify-content:center;border:1px solid #2b79d7;border-radius:3px;background:#fff;color:#12579f;padding:9px;cursor:pointer;font:700 13px/1.25 Arial,sans-serif!important;text-align:center;white-space:normal!important;margin-top:8px;';
     bulk.addEventListener('click', openBulkAssociationDialog);
-    menu.appendChild(bulk);
     const bulkHelp = document.createElement('div');
     bulkHelp.textContent = 'Uses exact IWP and Alt Doc Name matches. Each IWP change is reviewed before it is saved.';
     bulkHelp.style.cssText = 'color:#555;font-size:11px;margin:7px 0 11px;';
-    menu.appendChild(bulkHelp);
     const update = document.createElement('button');
     update.type = 'button';
     update.style.cssText = 'display:flex!important;box-sizing:border-box!important;width:100%!important;height:auto!important;min-height:44px!important;align-items:center;justify-content:center;border:1px solid #2b79d7;border-radius:3px;background:#fff;color:#12579f;padding:9px;cursor:pointer;font:700 13px/1.25 Arial,sans-serif!important;text-align:center;white-space:normal!important;margin-top:8px;';
@@ -1460,6 +1465,8 @@
     updateHelp.textContent = 'Updates one work package at a time. The current revisions are reviewed before SDx saves the change.';
     updateHelp.style.cssText = 'color:#555;font-size:11px;margin:7px 0 11px;';
     menu.appendChild(updateHelp);
+    menu.appendChild(bulk);
+    menu.appendChild(bulkHelp);
 
     const colorTitle = document.createElement('div');
     colorTitle.textContent = 'Highlight WPs with superseded documents';
