@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SDX IWP Helper
 // @namespace    https://burnsmcd.com
-// @version      0.7.1
+// @version      0.7.2
 // @description  Associate drawing lists with existing work packages, stamp drawing ZIPs, flag superseded revisions, and update document associations.
 // @match        https://*.intergraphsmartcloud.com/*
 // @grant        none
@@ -18,7 +18,7 @@
   window.__sdxWpStampedDrawingsLoaded = true;
   try { if (window.self !== window.top) return; } catch (_) { return; }
 
-  const VERSION = '0.7.1';
+  const VERSION = '0.7.2';
   const BUTTON_ID = 'sdx-iwp-tools-button';
   const TOOLBAR_ID = 'sdx-iwp-helper-toolbar';
   const MENU_ID = 'sdx-iwp-helper-menu';
@@ -470,6 +470,14 @@
     return clean(row.querySelector(`td[data-kendo-grid-column-index="${index}"]`)?.textContent);
   }
 
+  function rowHasExactCellValue(row, value) {
+    return [...row.querySelectorAll('td')].some(cell => clean(cell.textContent) === value);
+  }
+
+  function rowHasRevisionStatus(row, status) {
+    return [...row.querySelectorAll('td')].some(cell => clean(cell.textContent).toLowerCase() === status.toLowerCase());
+  }
+
   function wizardButton(wizard, label) {
     return [...wizard.querySelectorAll('button')].find(button => clean(button.textContent).toLowerCase() === label.toLowerCase());
   }
@@ -574,10 +582,14 @@
     const chooser = await waitForUi(revisionChooser, `revision results for ${name}`);
     await waitForUi(() => chooser.querySelectorAll('tr[role="row"][data-kendo-grid-item-index]').length > 0,
       `revision results for ${name}`);
-    const matches = [...chooser.querySelectorAll('tr[role="row"][data-kendo-grid-item-index]')]
-      .filter(row => wizardCell(row, 1) === name && /^current$/i.test(wizardCell(row, 6)));
+    const exactMatches = [...chooser.querySelectorAll('tr[role="row"][data-kendo-grid-item-index]')]
+      .filter(row => rowHasExactCellValue(row, name));
+    const matches = exactMatches.filter(row => rowHasRevisionStatus(row, 'CURRENT'));
     if (matches.length !== 1) {
-      throw new Error(`${name}: SDx returned ${matches.length} current revision matches. The update was canceled.`);
+      const reason = exactMatches.length && !matches.length
+        ? `SDx found ${exactMatches.length} revisions for ${name}, but none is marked CURRENT`
+        : `SDx returned ${matches.length} current revision matches for ${name}`;
+      throw new Error(`${reason}. The update was canceled.`);
     }
     const checkbox = matches[0].querySelector('input[type="checkbox"]');
     if (!checkbox || checkbox.disabled) throw new Error(`${name}: current revision cannot be selected. The update was canceled.`);
@@ -1450,7 +1462,7 @@
     bulk.style.cssText = 'display:flex!important;box-sizing:border-box!important;width:100%!important;height:auto!important;min-height:44px!important;align-items:center;justify-content:center;border:1px solid #2b79d7;border-radius:3px;background:#fff;color:#12579f;padding:9px;cursor:pointer;font:700 13px/1.25 Arial,sans-serif!important;text-align:center;white-space:normal!important;margin-top:8px;';
     bulk.addEventListener('click', openBulkAssociationDialog);
     const bulkHelp = document.createElement('div');
-    bulkHelp.textContent = 'Uses exact IWP and Alt Doc Name matches. Each IWP change is reviewed before it is saved.';
+    bulkHelp.textContent = 'Adds matching drawings to each IWP’s Required Documents. Review each IWP’s drawing updates before saving.';
     bulkHelp.style.cssText = 'color:#555;font-size:11px;margin:7px 0 11px;';
     const update = document.createElement('button');
     update.type = 'button';
