@@ -1,8 +1,8 @@
 # SDX IWP Helper
 
-A Tampermonkey userscript for SDx work packages (IWPs). It highlights packages with superseded documents, downloads stamped PDF drawings as ZIP files, and helps replace superseded document associations with current revisions.
+A Tampermonkey userscript for SDx work packages (IWPs). It bulk associates drawing lists with existing IWPs, highlights packages with superseded documents, downloads stamped PDF drawings as ZIP files, and helps replace superseded document associations with current revisions.
 
-The current userscript version is **0.6.7**. The script is in [SDx-WP-Stamped-Drawings.user.js](SDx-WP-Stamped-Drawings.user.js).
+The current userscript version is **0.7.0**. The script is in [SDx-WP-Stamped-Drawings.user.js](SDx-WP-Stamped-Drawings.user.js).
 
 ## Install
 
@@ -18,6 +18,7 @@ The script runs on matching `intergraphsmartcloud.com` pages. It requires access
 | --- | --- |
 | Superseded row highlighting | Checks SDx's **Superseded Documents** widget for work packages visible in the results grid. Packages with a count above zero are yellow when **Planned** and red when **Active** or **Executed**, by default. |
 | Stamp and download | Creates a separate ZIP for each selected work package. Each attached PDF is stamped in red at the upper right of every page with `WP # <work package name> CONTROLLED`. Every ZIP also includes a blue-banded, landscape 11×17 controlled drawing list with Alt Doc Name, Drawing Title, and Rev; long lists continue on additional pages. |
+| Build drawing associations from CSV | Downloads a two-column template (`IWP Name`, `Alt Doc Name`), checks that each exact IWP name exists in SDx and is visible in the current results grid, then uses each IWP's Update form to add the current drawing revision. Already-associated current drawings are skipped. Each IWP change needs confirmation before SDx saves it. |
 | Superseded download guard | Rechecks the selected package's superseded count before stamping. By default, any superseded document blocks that package's ZIP and displays a warning. |
 | Per-download override | The download dialog shows this unchecked option only when SDx identifies superseded documents in a selected package. It names the affected packages. An override includes their superseded versions for that run, with a large, diagonal, translucent red **SUPERSEDED** mark on those PDF pages. The option must be selected again for every download. |
 | Update superseded documents | For one package at a time, opens SDx's Update form, removes its superseded Required Documents associations, finds and adds the matching current revisions, and asks for confirmation before saving. |
@@ -50,6 +51,17 @@ The unlink control used here is the chain-break icon **inside the Update form's 
 
 The helper stops before saving if the superseded counts disagree, a current revision cannot be uniquely identified, or the draft changes unexpectedly. If SDx reports superseded documents after a save, inspect the package in SDx; the helper will report that result.
 
+## Build drawing associations from a CSV
+
+1. Open **Results: General Work Packages** and make sure the IWPs you plan to use are visible in the current results grid.
+2. Click **IWP TOOLS** → **Build drawing associations from CSV** and download the template.
+3. Fill in one row per drawing. Repeat the IWP name for each drawing in that package. The required headers are `IWP Name` and `Alt Doc Name`.
+4. Upload the CSV and choose **Check IWP names**. The helper requires an exact IWP name match in SDx and in the visible grid. If any IWP is missing or not visible, no associations are changed; correct the name or adjust the results grid and retry.
+5. Choose **Associate drawings**. For each IWP, the helper searches SDx for one current Document Revision whose Alt Doc Name matches exactly. A current drawing already associated with that IWP is skipped. If a requested drawing cannot be uniquely found, the helper cancels that IWP's unsaved draft and reports the issue.
+6. Review the confirmation for each IWP and choose **OK** to save its associations in SDx. Cancel stops the remaining IWPs; earlier IWPs you confirmed stay saved.
+
+The CSV upload only adds Required Documents associations. It does not create IWPs, replace superseded revisions, or change drawing records. Keep the IWP names and Alt Doc Names exactly as they appear in SDx.
+
 ## Change the row colors
 
 Open **IWP TOOLS** and use the **Highlight WPs with superseded documents** controls. There is a separate on/off checkbox and color picker for **Planned**, **Active**, and **Executed**. **Reset colors** restores the default color values. Settings are saved locally in the current browser.
@@ -68,6 +80,8 @@ When publishing a code change, increment both the header `@version` and the `VER
 | --- | --- |
 | **IWP TOOLS** is missing | Verify the userscript is enabled, reload SDx, and open the Work Packages results page. Confirm you are signed in. |
 | **No selected work packages** | Check one or more boxes in the results grid before downloading. For an update, check exactly one package or open its side panel with no boxes checked. |
+| CSV reports an IWP name is missing | Check the spelling and capitalization against SDx, and make sure the IWP is present in the current General Work Packages results grid. |
+| CSV drawing cannot be found | Check the Alt Doc Name in SDx. The helper requires one current Document Revision with an exact name match. |
 | **Could not read the SDx session token** | Reload SDx, sign in if needed, and try again. |
 | Superseded warning, no ZIP | This is the default safeguard. Update the package's associations, or explicitly select the override in the download dialog for that run. |
 | **No attached PDF drawings** | Check that the package's documents have downloadable PDF attachments in SDx. Non-PDF files are not stamped. |

@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         SDX IWP Helper
 // @namespace    https://burnsmcd.com
-// @version      0.6.7
-// @description  Stamp drawing ZIPs, flag superseded revisions, and update work package document associations.
+// @version      0.7.0
+// @description  Associate drawing lists with existing work packages, stamp drawing ZIPs, flag superseded revisions, and update document associations.
 // @match        https://*.intergraphsmartcloud.com/*
 // @grant        none
 // @require      https://cdnjs.cloudflare.com/ajax/libs/pdf-lib/1.17.1/pdf-lib.min.js
@@ -18,11 +18,12 @@
   window.__sdxWpStampedDrawingsLoaded = true;
   try { if (window.self !== window.top) return; } catch (_) { return; }
 
-  const VERSION = '0.6.7';
+  const VERSION = '0.7.0';
   const BUTTON_ID = 'sdx-iwp-tools-button';
   const TOOLBAR_ID = 'sdx-iwp-helper-toolbar';
   const MENU_ID = 'sdx-iwp-helper-menu';
   const DOWNLOAD_DIALOG_ID = 'sdx-iwp-download-dialog';
+  const BULK_DIALOG_ID = 'sdx-iwp-bulk-dialog';
   const PANEL_ID = 'sdx-wp-stamped-zip-panel';
   const SETTINGS_KEY = 'sdx-iwp-helper-settings-v1';
   const CHECKBOX_SELECTOR = 'input[type="checkbox"].mdc-checkbox__native-control';
@@ -576,6 +577,276 @@
     await waitForUi(() => !revisionChooser(), 'revision chooser to close');
     await waitForUi(() => wizardRows(wizard).some(row => wizardCell(row, 2) === name && /^current$/i.test(wizardCell(row, 7))),
       `${name} current revision in the update form`);
+  }
+
+  function parseCsv(text) {
+    const rows = [];
+    let row = [];
+    let field = '';
+    let quoted = false;
+    const source = String(text || '').replace(/^\uFEFF/, '');
+    for (let index = 0; index < source.length; index++) {
+      const char = source[index];
+      if (quoted) {
+        if (char === '"' && source[index + 1] === '"') { field += '"'; index++; }
+        else if (char === '"') quoted = false;
+        else field += char;
+      } else if (char === '"' && field === '') quoted = true;
+      else if (char === ',') { row.push(field); field = ''; }
+      else if (char === '\n' || char === '\r') {
+        if (char === '\r' && source[index + 1] === '\n') index++;
+        row.push(field); rows.push(row); row = []; field = '';
+      } else field += char;
+    }
+    if (quoted) throw new Error('The CSV has an unclosed quoted field.');
+    if (field || row.length) { row.push(field); rows.push(row); }
+    return rows;
+  }
+
+  function parseAssociationCsv(text) {
+    const rows = parseCsv(text).filter(row => row.some(cell => clean(cell)));
+    if (rows.length < 2) throw new Error('The CSV must include the header row and at least one drawing.');
+    const header = rows[0].map(cell => clean(cell).toLowerCase());
+    const wpColumn = header.indexOf('iwp name');
+    const docColumn = header.indexOf('alt doc name');
+    if (wpColumn < 0 || docColumn < 0) throw new Error('Required headers are “IWP Name” and “Alt Doc Name”. Download a fresh template if needed.');
+    const entries = [];
+    const seen = new Set();
+    rows.slice(1).forEach((row, index) => {
+      const wpName = clean(row[wpColumn]);
+      const altDocName = clean(row[docColumn]);
+      if (!wpName || !altDocName) throw new Error(`CSV row ${index + 2} needs both an IWP Name and an Alt Doc Name.`);
+      const key = `${wpName}\u0000${altDocName}`;
+      if (seen.has(key)) throw new Error(`CSV row ${index + 2} duplicates ${wpName} / ${altDocName}.`);
+      seen.add(key);
+      entries.push({ wpName, altDocName });
+    });
+    return entries;
+  }
+
+  function downloadAssociationTemplate() {
+    const blob = new Blob(['IWP Name,Alt Doc Name\r\n'], { type: 'text/csv;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = 'IWP_Drawing_Associations_Template.csv';
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 10000);
+  }
+
+  function associationGroups(entries) {
+    const groups = new Map();
+    entries.forEach(entry => {
+      if (!groups.has(entry.wpName)) groups.set(entry.wpName, []);
+      groups.get(entry.wpName).push(entry.altDocName);
+    });
+    return [...groups].map(([name, altDocNames]) => ({ name, altDocNames }));
+  }
+
+  async function findExactBulkWorkPackages(groups, token, config) {
+    const names = groups.map(group => group.name);
+    const found = new Map();
+    for (let offset = 0; offset < names.length; offset += 20) {
+      const batch = names.slice(offset, offset + 20);
+      const filter = batch.map(name => `Name eq '${name.replace(/'/g, "''")}'`).join(' or ');
+      const params = new URLSearchParams({ '$format': 'json', '$top': '500', '$filter': `(${filter})` });
+      const data = await apiJson(`${apiBase()}/WorkPackages?${params}`, token, config, { method: 'GET' });
+      (Array.isArray(data.value) ? data.value : []).forEach(row => {
+        const name = String(row.Name || row.CI_Name || '');
+        if (!batch.includes(name)) return;
+        const id = clean(row.OBID || row.Id || row.id);
+        if (!id) return;
+        if (!found.has(name)) found.set(name, []);
+        found.get(name).push({ id, name, config: row.Config || row.SPFConfigUID || config });
+      });
+    }
+    const visibleRows = [...document.querySelectorAll('.k-grid-content-locked tr[data-uid]')];
+    return groups.map(group => {
+      const matches = found.get(group.name) || [];
+      const visible = visibleRows.find(row => workPackageNameFromRow(row) === group.name);
+      const item = visible && rowData(visible);
+      if (matches.length !== 1) return { ...group, error: matches.length ? `More than one exact SDx work package named “${group.name}” was found.` : `No exact IWP name match for “${group.name}”.` };
+      if (!visible || !item) return { ...group, error: `“${group.name}” exists in SDx but is not in the current results grid. Show it in Results: General Work Packages, then retry.` };
+      const rowId = clean(item.OBID || item.Id || item.id);
+      if (rowId && rowId !== matches[0].id) return { ...group, error: `The visible “${group.name}” row does not match the SDx object returned by the exact-name search.` };
+      return { ...group, id: matches[0].id, config: item.Config || item.SPFConfigUID || config };
+    });
+  }
+
+  function closeBulkDialog() {
+    document.getElementById(BULK_DIALOG_ID)?.remove();
+  }
+
+  function openBulkAssociationDialog() {
+    if (busy || document.getElementById(BULK_DIALOG_ID)) return;
+    closeMenu();
+    if (!onWorkPackageResultsPage()) {
+      openPanel();
+      setStatus('Open Results: General Work Packages to build drawing associations from a CSV.', true);
+      return;
+    }
+    const token = tokenFromSession();
+    if (!token) {
+      openPanel();
+      setStatus('Could not read the SDx session token. Reload SDx and try again.', true);
+      return;
+    }
+    const overlay = document.createElement('div');
+    overlay.id = BULK_DIALOG_ID;
+    overlay.style.cssText = 'position:fixed;inset:0;z-index:2147483647;display:flex;align-items:center;justify-content:center;background:#0008;padding:16px;font:13px/1.4 Arial,sans-serif;';
+    const dialog = document.createElement('div');
+    dialog.setAttribute('role', 'dialog');
+    dialog.setAttribute('aria-modal', 'true');
+    dialog.setAttribute('aria-label', 'Build drawing associations from CSV');
+    dialog.style.cssText = 'width:540px;max-width:100%;max-height:90vh;overflow:auto;background:white;color:#242424;border-radius:5px;box-shadow:0 8px 28px #0005;padding:20px;';
+    const heading = document.createElement('h2');
+    heading.textContent = 'Build drawing associations';
+    heading.style.cssText = 'font:700 18px Arial,sans-serif;margin:0 0 10px;';
+    const help = document.createElement('p');
+    help.textContent = 'Upload a CSV with one IWP Name and Alt Doc Name pair per row. Repeat an IWP name to associate multiple drawings. Both names must match SDx exactly.';
+    help.style.cssText = 'margin:0 0 12px;';
+    const template = document.createElement('button');
+    template.type = 'button';
+    template.textContent = 'Download CSV template';
+    template.style.cssText = 'border:1px solid #2b79d7;border-radius:3px;background:#fff;color:#12579f;padding:7px 10px;font-weight:700;cursor:pointer;margin-bottom:12px;';
+    template.addEventListener('click', downloadAssociationTemplate);
+    const file = document.createElement('input');
+    file.type = 'file';
+    file.accept = '.csv,text/csv';
+    file.setAttribute('aria-label', 'Choose drawing association CSV');
+    file.style.cssText = 'display:block;margin:0 0 12px;max-width:100%;';
+    const preview = document.createElement('div');
+    preview.style.cssText = 'max-height:220px;overflow:auto;border:1px solid #ddd;padding:9px;margin:0 0 12px;white-space:pre-wrap;';
+    preview.textContent = 'Choose a CSV to preview its IWP and drawing rows.';
+    const actions = document.createElement('div');
+    actions.style.cssText = 'display:flex;justify-content:flex-end;gap:8px;';
+    const cancel = document.createElement('button');
+    cancel.type = 'button'; cancel.textContent = 'Cancel';
+    cancel.style.cssText = 'border:1px solid #aaa;border-radius:3px;background:#fff;padding:8px 12px;cursor:pointer;';
+    cancel.addEventListener('click', closeBulkDialog);
+    const proceed = document.createElement('button');
+    proceed.type = 'button'; proceed.textContent = 'Check IWP names'; proceed.disabled = true;
+    proceed.style.cssText = 'border:1px solid #1d64b7;border-radius:3px;background:#2b79d7;color:white;padding:8px 12px;font-weight:700;cursor:pointer;';
+    let entries = null;
+    let validatedGroups = null;
+    file.addEventListener('change', async () => {
+      entries = null; validatedGroups = null; proceed.disabled = true; proceed.textContent = 'Check IWP names';
+      const selectedFile = file.files && file.files[0];
+      if (!selectedFile) { preview.textContent = 'Choose a CSV to preview its IWP and drawing rows.'; return; }
+      try {
+        entries = parseAssociationCsv(await selectedFile.text());
+        const groups = associationGroups(entries);
+        const lines = groups.map(group => `${group.name} (${group.altDocNames.length} drawing${group.altDocNames.length === 1 ? '' : 's'})`).join('\n');
+        preview.textContent = `${entries.length} drawing row${entries.length === 1 ? '' : 's'} across ${groups.length} IWP${groups.length === 1 ? '' : 's'}:\n\n${lines}`;
+        proceed.disabled = false;
+      } catch (error) { preview.textContent = error?.message || String(error); }
+    });
+    proceed.addEventListener('click', async () => {
+      if (!entries) return;
+      if (validatedGroups) {
+        const ready = validatedGroups.filter(group => !group.error);
+        if (!ready.length) return;
+        closeBulkDialog();
+        runBulkAssociations(ready, token);
+        return;
+      }
+      proceed.disabled = true;
+      proceed.textContent = 'Checking…';
+      preview.textContent = 'Checking exact IWP names in SDx and the current results grid…';
+      try {
+        validatedGroups = await findExactBulkWorkPackages(associationGroups(entries), token, currentEntityType()?.config?.key || null);
+        const missing = validatedGroups.filter(group => group.error);
+        if (missing.length) {
+          preview.textContent = `No associations were changed. Fix these IWP names or show the matching IWPs in the current results grid, then retry:\n\n${missing.map(group => `• ${group.error}`).join('\n')}`;
+          proceed.textContent = 'Check again';
+          validatedGroups = null;
+        } else {
+          preview.textContent = `Found all ${validatedGroups.length} exact IWP name${validatedGroups.length === 1 ? '' : 's'} in SDx and in the current results grid. Select Associate drawings to open each IWP and review its draft before saving.`;
+          proceed.textContent = 'Associate drawings';
+        }
+        proceed.disabled = false;
+      } catch (error) {
+        preview.textContent = error?.message || String(error);
+        proceed.textContent = 'Check again';
+        proceed.disabled = false;
+      }
+    });
+    actions.append(cancel, proceed);
+    dialog.append(heading, help, template, file, preview, actions);
+    overlay.appendChild(dialog);
+    overlay.addEventListener('pointerdown', event => { if (event.target === overlay) closeBulkDialog(); });
+    document.body.appendChild(overlay);
+    cancel.focus();
+  }
+
+  async function runBulkAssociations(groups, token) {
+    if (busy) return;
+    busy = true;
+    closeMenu();
+    updateButton();
+    openPanel();
+    document.getElementById(`${PANEL_ID}-log`).replaceChildren();
+    let completed = 0;
+    let failed = 0;
+    let canceled = false;
+    try {
+      for (const group of groups) {
+        if (canceled) break;
+        let wizard = null;
+        try {
+          setStatus(`Opening ${group.name}…`);
+          wizard = await openUpdateWizard(group);
+          await waitForUi(() => {
+            const panel = wizard.querySelector('.related-items-panel');
+            const grid = panel && panel.querySelector('.k-grid-content, .k-grid-content-locked');
+            return grid && !panel.querySelector('.k-loading-mask') ? grid : null;
+          }, `${group.name} Required Documents grid`);
+          const toAdd = [];
+          const alreadyLinked = [];
+          for (const altDocName of group.altDocNames) {
+            const linked = wizardRows(wizard).filter(row => wizardCell(row, 2) === altDocName && /^current$/i.test(wizardCell(row, 7)));
+            if (linked.length > 1) throw new Error(`${altDocName}: multiple current revisions are already associated with ${group.name}. This IWP was not saved.`);
+            if (linked.length === 1) { alreadyLinked.push(altDocName); continue; }
+            setStatus(`Finding current drawing ${altDocName} for ${group.name}…`);
+            await addCurrentRevision(wizard, altDocName);
+            toAdd.push(altDocName);
+            setProgress(`${group.name}: found current drawing ${altDocName}.`);
+          }
+          if (!toAdd.length) {
+            await discardWizard(); wizard = null;
+            setProgress(`${group.name}: all ${alreadyLinked.length} drawing${alreadyLinked.length === 1 ? '' : 's'} were already associated. No change saved.`);
+            completed++;
+            continue;
+          }
+          const accepted = window.confirm(`Associate drawings with ${group.name}?\n\n${toAdd.length} current drawing${toAdd.length === 1 ? '' : 's'} will be added to this IWP:\n\n${toAdd.join('\n')}\n\n${alreadyLinked.length ? `${alreadyLinked.length} drawing${alreadyLinked.length === 1 ? '' : 's'} already associated will be skipped.\n\n` : ''}Save this work package update in SDx?`);
+          if (!accepted) {
+            await discardWizard(); wizard = null;
+            canceled = true;
+            setProgress(`Canceled at ${group.name}. No changes were saved for this IWP; earlier confirmed IWPs remain saved.`);
+            break;
+          }
+          clickUi(wizardButton(wizard, 'Update'), 'Update button');
+          await waitForUi(() => !document.querySelector('sda-edit-obj-modal-view'), 'Update form to close');
+          wizard = null;
+          completed++;
+          setProgress(`${group.name}: saved ${toAdd.length} drawing association${toAdd.length === 1 ? '' : 's'}${alreadyLinked.length ? `; skipped ${alreadyLinked.length} already linked` : ''}.`);
+        } catch (error) {
+          if (wizard?.isConnected) await discardWizard().catch(() => {});
+          failed++;
+          setProgress(`WARNING: ${group.name}: ${error?.message || String(error)} No changes were saved for this IWP.`);
+        }
+      }
+      const attempted = completed + failed;
+      setStatus(canceled
+        ? `Canceled after ${attempted} of ${groups.length} IWP${groups.length === 1 ? '' : 's'}.`
+        : `Finished: ${completed} IWP${completed === 1 ? '' : 's'} processed; ${failed} failed.`,
+      failed > 0);
+    } finally {
+      busy = false;
+      updateButton();
+    }
   }
 
   async function updateSupersededDocuments() {
@@ -1166,6 +1437,16 @@
     download.appendChild(downloadLabel);
     download.addEventListener('click', openDownloadDialog);
     menu.appendChild(download);
+    const bulk = document.createElement('button');
+    bulk.type = 'button';
+    bulk.textContent = 'Build drawing associations from CSV';
+    bulk.style.cssText = 'display:flex!important;box-sizing:border-box!important;width:100%!important;height:auto!important;min-height:44px!important;align-items:center;justify-content:center;border:1px solid #2b79d7;border-radius:3px;background:#fff;color:#12579f;padding:9px;cursor:pointer;font:700 13px/1.25 Arial,sans-serif!important;text-align:center;white-space:normal!important;margin-top:8px;';
+    bulk.addEventListener('click', openBulkAssociationDialog);
+    menu.appendChild(bulk);
+    const bulkHelp = document.createElement('div');
+    bulkHelp.textContent = 'Uses exact IWP and Alt Doc Name matches. Each IWP change is reviewed before it is saved.';
+    bulkHelp.style.cssText = 'color:#555;font-size:11px;margin:7px 0 11px;';
+    menu.appendChild(bulkHelp);
     const update = document.createElement('button');
     update.type = 'button';
     update.style.cssText = 'display:flex!important;box-sizing:border-box!important;width:100%!important;height:auto!important;min-height:44px!important;align-items:center;justify-content:center;border:1px solid #2b79d7;border-radius:3px;background:#fff;color:#12579f;padding:9px;cursor:pointer;font:700 13px/1.25 Arial,sans-serif!important;text-align:center;white-space:normal!important;margin-top:8px;';
