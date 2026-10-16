@@ -2,7 +2,7 @@
 
 A Tampermonkey userscript for SDx work packages (IWPs). It bulk associates drawing lists with existing IWPs, highlights packages with superseded documents, downloads stamped PDF drawings as ZIP files, and helps replace superseded document associations with current revisions.
 
-The current userscript version is **0.7.2**. The script is in [SDx-WP-Stamped-Drawings.user.js](SDx-WP-Stamped-Drawings.user.js).
+The current userscript version is **0.7.3**. The script is in [SDx-WP-Stamped-Drawings.user.js](SDx-WP-Stamped-Drawings.user.js).
 
 ## Install
 
@@ -58,7 +58,7 @@ The helper stops before saving if the superseded counts disagree, a current revi
 3. Fill in one row per drawing. Repeat the IWP name for each drawing in that package. The required headers are `IWP Name` and `Alt Doc Name`.
 4. Upload the CSV and choose **Check IWP names**. The helper requires an exact IWP name match in SDx and in the visible grid. If any IWP is missing or not visible, no associations are changed; correct the name or adjust the results grid and retry.
 5. Choose **Associate drawings**. For each IWP, the helper searches SDx for one current Document Revision whose Alt Doc Name matches exactly, including when the IWP currently has no Required Documents. A current drawing already associated with that IWP is skipped. If a requested drawing cannot be uniquely found, the helper cancels that IWP's unsaved draft and reports the issue.
-6. Review the confirmation for each IWP and choose **OK** to save its associations in SDx. Cancel stops the remaining IWPs; earlier IWPs you confirmed stay saved.
+6. Review the confirmation for each IWP and choose **OK** to save its associations in SDx. The helper reopens the IWP to verify that SDx saved the drawings. Cancel stops the remaining IWPs; earlier IWPs you confirmed stay saved.
 
 The CSV upload only adds Required Documents associations. It does not create IWPs, replace superseded revisions, or change drawing records. Keep the IWP names and Alt Doc Names exactly as they appear in SDx.
 

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SDX IWP Helper
 // @namespace    https://burnsmcd.com
-// @version      0.7.2
+// @version      0.7.3
 // @description  Associate drawing lists with existing work packages, stamp drawing ZIPs, flag superseded revisions, and update document associations.
 // @match        https://*.intergraphsmartcloud.com/*
 // @grant        none
@@ -18,7 +18,7 @@
   window.__sdxWpStampedDrawingsLoaded = true;
   try { if (window.self !== window.top) return; } catch (_) { return; }
 
-  const VERSION = '0.7.2';
+  const VERSION = '0.7.3';
   const BUTTON_ID = 'sdx-iwp-tools-button';
   const TOOLBAR_ID = 'sdx-iwp-helper-toolbar';
   const MENU_ID = 'sdx-iwp-helper-menu';
@@ -455,7 +455,7 @@
     return [...wizard.querySelectorAll('.related-items-panel tr[role="row"][data-kendo-grid-item-index]')];
   }
 
-  async function waitForRequiredDocumentsLoaded(wizard, description) {
+  async function waitForRequiredDocumentsLoaded(wizard, description, timeout = 20000) {
     await waitForUi(() => {
       const tabs = [...wizard.querySelectorAll('[role="tab"], .mat-mdc-tab')];
       const requiredTab = tabs.find(tab => /required documents/i.test(clean(tab.textContent)));
@@ -463,7 +463,7 @@
       const count = clean(requiredTab.textContent).match(/required documents\s*(\d+)/i);
       if (count && Number(count[1]) === 0) return true;
       return wizardRows(wizard).length ? true : null;
-    }, description);
+    }, description, timeout);
   }
 
   function wizardCell(row, index) {
@@ -594,12 +594,13 @@
     const checkbox = matches[0].querySelector('input[type="checkbox"]');
     if (!checkbox || checkbox.disabled) throw new Error(`${name}: current revision cannot be selected. The update was canceled.`);
     if (!checkbox.checked) clickUi(checkbox, `${name} current revision checkbox`);
+    await waitForUi(() => checkbox.checked, `${name} current revision selection`, 10000);
     const add = [...chooser.querySelectorAll('button')].find(button => clean(button.textContent).toUpperCase() === 'ADD');
-    await waitForUi(() => add && !add.disabled, `ADD button for ${name}`);
+    await waitForUi(() => add && !add.disabled, `ADD button for ${name}`, 60000);
     clickUi(add, `ADD button for ${name}`);
-    await waitForUi(() => !revisionChooser(), 'revision chooser to close');
+    await waitForUi(() => !revisionChooser(), `revision chooser to close after adding ${name}`, 60000);
     await waitForUi(() => wizardRows(wizard).some(row => wizardCell(row, 2) === name && /^current$/i.test(wizardCell(row, 7))),
-      `${name} current revision in the update form`);
+      `${name} to appear in the IWP Required Documents draft`, 60000);
   }
 
   function parseCsv(text) {
@@ -818,10 +819,11 @@
       for (const group of groups) {
         if (canceled) break;
         let wizard = null;
+      let saveAttempted = false;
         try {
           setStatus(`Opening ${group.name}…`);
           wizard = await openUpdateWizard(group);
-          await waitForRequiredDocumentsLoaded(wizard, `${group.name} Required Documents list`);
+          await waitForRequiredDocumentsLoaded(wizard, `${group.name} Required Documents list`, 60000);
           const toAdd = [];
           const alreadyLinked = [];
           for (const altDocName of group.altDocNames) {
@@ -846,15 +848,34 @@
             setProgress(`Canceled at ${group.name}. No changes were saved for this IWP; earlier confirmed IWPs remain saved.`);
             break;
           }
+          saveAttempted = true;
           clickUi(wizardButton(wizard, 'Update'), 'Update button');
-          await waitForUi(() => !document.querySelector('sda-edit-obj-modal-view'), 'Update form to close');
+          await waitForUi(() => !document.querySelector('sda-edit-obj-modal-view'), 'Update form to close after save', 60000);
           wizard = null;
+
+          setStatus(`Verifying drawings saved to ${group.name}…`);
+          wizard = await openUpdateWizard(group);
+          await waitForRequiredDocumentsLoaded(wizard, `${group.name} saved Required Documents list`, 60000);
+          const saved = await waitForUi(() => {
+            const linked = new Set(wizardRows(wizard)
+              .filter(row => /^current$/i.test(wizardCell(row, 7)))
+              .map(row => wizardCell(row, 2)));
+            return toAdd.every(name => linked.has(name));
+          }, `${group.name} saved drawing associations`, 60000).catch(() => false);
+          await discardWizard();
+          wizard = null;
+          if (!saved) {
+            throw new Error(`SDx closed the Update form, but ${toAdd.join(', ')} was not confirmed in ${group.name}'s saved Required Documents.`);
+          }
           completed++;
           setProgress(`${group.name}: saved ${toAdd.length} drawing association${toAdd.length === 1 ? '' : 's'}${alreadyLinked.length ? `; skipped ${alreadyLinked.length} already linked` : ''}.`);
         } catch (error) {
           if (wizard?.isConnected) await discardWizard().catch(() => {});
           failed++;
-          setProgress(`WARNING: ${group.name}: ${error?.message || String(error)} No changes were saved for this IWP.`);
+          const outcome = saveAttempted
+            ? 'The save was submitted, but SDx did not confirm the saved association; check this IWP before retrying.'
+            : 'No changes were saved for this IWP.';
+          setProgress(`WARNING: ${group.name}: ${error?.message || String(error)} ${outcome}`);
         }
       }
       const attempted = completed + failed;
