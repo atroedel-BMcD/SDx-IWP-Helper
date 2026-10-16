@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SDX IWP Helper
 // @namespace    https://burnsmcd.com
-// @version      0.7.4
+// @version      0.7.5
 // @description  Associate drawing lists with existing work packages, stamp drawing ZIPs, flag superseded revisions, and update document associations.
 // @match        https://*.intergraphsmartcloud.com/*
 // @grant        none
@@ -18,7 +18,7 @@
   window.__sdxWpStampedDrawingsLoaded = true;
   try { if (window.self !== window.top) return; } catch (_) { return; }
 
-  const VERSION = '0.7.4';
+  const VERSION = '0.7.5';
   const BUTTON_ID = 'sdx-iwp-tools-button';
   const TOOLBAR_ID = 'sdx-iwp-helper-toolbar';
   const MENU_ID = 'sdx-iwp-helper-menu';
@@ -456,13 +456,18 @@
       .filter(row => row.querySelectorAll('td').length > 2);
   }
 
+  function requiredDocumentsCount(wizard) {
+    const tabs = [...wizard.querySelectorAll('[role="tab"], .mat-mdc-tab')];
+    const requiredTab = tabs.find(tab => /required documents/i.test(clean(tab.textContent)));
+    const count = clean(requiredTab?.textContent).match(/required documents\s*(\d+)/i);
+    return count ? Number(count[1]) : null;
+  }
+
   async function waitForRequiredDocumentsLoaded(wizard, description, timeout = 20000) {
     await waitForUi(() => {
-      const tabs = [...wizard.querySelectorAll('[role="tab"], .mat-mdc-tab')];
-      const requiredTab = tabs.find(tab => /required documents/i.test(clean(tab.textContent)));
-      if (!requiredTab) return null;
-      const count = clean(requiredTab.textContent).match(/required documents\s*(\d+)/i);
-      if (count && Number(count[1]) === 0) return true;
+      const count = requiredDocumentsCount(wizard);
+      if (count === null) return null;
+      if (count === 0) return true;
       return wizardRows(wizard).length ? true : null;
     }, description, timeout);
   }
@@ -579,33 +584,120 @@
     return wizard;
   }
 
-  async function addCurrentRevision(wizard, name) {
-    const input = wizard.querySelector('input[placeholder="Search Document Revisions"]');
-    setUiInput(input, name);
-    const search = input.closest('.search-query')?.querySelector('.search-query__submit button');
-    clickUi(search, `revision search for ${name}`);
-    const chooser = await waitForUi(revisionChooser, `revision results for ${name}`);
-    await waitForUi(() => chooser.querySelectorAll('tr[role="row"][data-kendo-grid-item-index]').length > 0,
-      `revision results for ${name}`);
-    const exactMatches = [...chooser.querySelectorAll('tr[role="row"][data-kendo-grid-item-index]')]
-      .filter(row => rowHasExactCellValue(row, name));
-    const matches = exactMatches.filter(row => rowHasRevisionStatus(row, 'CURRENT'));
-    if (matches.length !== 1) {
-      const reason = exactMatches.length && !matches.length
-        ? `SDx found ${exactMatches.length} revisions for ${name}, but none is marked CURRENT`
-        : `SDx returned ${matches.length} current revision matches for ${name}`;
-      throw new Error(`${reason}. The update was canceled.`);
+  function revisionChooserRows(chooser) {
+    return [...chooser.querySelectorAll('tr[role="row"][data-kendo-grid-item-index]')];
+  }
+
+  async function chooserSearchRows(chooser, name, searchInsideChooser) {
+    const previousRows = revisionChooserRows(chooser);
+    const previousText = previousRows.map(row => clean(row.textContent)).join('\u0000');
+    const started = Date.now();
+    if (searchInsideChooser) {
+      const input = chooser.querySelector('input[title="Search Document Revisions"]');
+      setUiInput(input, name);
+      clickUi(input.closest('.search-query')?.querySelector('.search-query__submit button'),
+        `revision results search for ${name}`);
     }
-    const checkbox = matches[0].querySelector('input[type="checkbox"]');
-    if (!checkbox || checkbox.disabled) throw new Error(`${name}: current revision cannot be selected. The update was canceled.`);
-    if (!checkbox.checked) clickUi(checkbox, `${name} current revision checkbox`);
-    await waitForUi(() => checkbox.checked, `${name} current revision selection`, 10000);
+    let emptySince = 0;
+    const result = await waitForUi(() => {
+      if (chooser.querySelector('.k-loading-mask, .k-loading-panel')) {
+        emptySince = 0;
+        return null;
+      }
+      const rows = revisionChooserRows(chooser);
+      if (rows.some(row => rowHasExactCellValue(row, name))) return { rows };
+      const text = rows.map(row => clean(row.textContent)).join('\u0000');
+      if (rows.length && (!searchInsideChooser || text !== previousText)) return { rows };
+      const empty = chooser.querySelector('.k-grid-norecords');
+      if (empty) {
+        if (!emptySince) emptySince = Date.now();
+        if (Date.now() - emptySince >= 3000 && Date.now() - started >= 5000) {
+          return { rows: [] };
+        }
+      }
+      return null;
+    }, `revision results for ${name}`, 30000);
+    return result.rows;
+  }
+
+  async function addCurrentRevisionBatch(wizard, names) {
+    const beforeCount = requiredDocumentsCount(wizard);
+    if (beforeCount === null) throw new Error('SDx did not show the Required Documents count. The update was canceled.');
+    const input = wizard.querySelector('input[placeholder="Search Document Revisions"]');
+    setUiInput(input, names[0]);
+    const search = input.closest('.search-query')?.querySelector('.search-query__submit button');
+    clickUi(search, `revision search for ${names[0]}`);
+    const chooser = await waitForUi(revisionChooser, `revision results for ${names[0]}`);
+    const selected = [];
+    const skipped = [];
+    for (let index = 0; index < names.length; index++) {
+      const name = names[index];
+      const visibleRows = revisionChooserRows(chooser);
+      const alreadyVisible = visibleRows.some(row =>
+        rowHasExactCellValue(row, name) && rowHasRevisionStatus(row, 'CURRENT'));
+      const rows = alreadyVisible ? visibleRows : await chooserSearchRows(chooser, name, index > 0);
+      const exactMatches = rows.filter(row => rowHasExactCellValue(row, name));
+      const matches = exactMatches.filter(row => rowHasRevisionStatus(row, 'CURRENT'));
+      if (matches.length !== 1) {
+        const reason = !rows.length ? 'no revisions found in SDx'
+          : !exactMatches.length ? 'no exact Alt Doc Name match in the search results'
+          : `${matches.length} CURRENT revisions among ${exactMatches.length} exact matches`;
+        skipped.push({ name, reason });
+        continue;
+      }
+      const checkbox = matches[0].querySelector('input[type="checkbox"]');
+      if (!checkbox || checkbox.disabled) {
+        skipped.push({ name, reason: 'current revision cannot be selected' });
+        continue;
+      }
+      if (!checkbox.checked) clickUi(checkbox, `${name} current revision checkbox`);
+      await waitForUi(() => checkbox.checked, `${name} current revision selection`, 10000);
+      selected.push(name);
+    }
+    if (!selected.length) {
+      const cancel = [...chooser.querySelectorAll('button')]
+        .find(button => clean(button.textContent).toLowerCase() === 'cancel');
+      clickUi(cancel, 'revision results Cancel button');
+      await waitForUi(() => !revisionChooser(), 'revision chooser to close', 5000);
+      return { added: [], skipped };
+    }
+    const selectedItems = [...chooser.querySelectorAll('button')]
+      .find(button => /^selected items(?:\s*\d+)?$/i.test(clean(button.textContent)));
+    clickUi(selectedItems, 'Selected Items button');
+    await waitForUi(() => {
+      const rows = revisionChooserRows(chooser);
+      return rows.length === selected.length && selected.every(name =>
+        rows.filter(row => rowHasExactCellValue(row, name) && rowHasRevisionStatus(row, 'CURRENT') &&
+          row.querySelector('input[type="checkbox"]')?.checked).length === 1);
+    }, 'selected current revisions', 20000);
     const add = [...chooser.querySelectorAll('button')].find(button => clean(button.textContent).toUpperCase() === 'ADD');
-    await waitForUi(() => add && !add.disabled, `ADD button for ${name}`, 60000);
-    clickUi(add, `ADD button for ${name}`);
-    await waitForUi(() => !revisionChooser(), `revision chooser to close after adding ${name}`, 60000);
-    await waitForUi(() => wizardDrawingRows(wizard, name, 'CURRENT').length > 0,
-      `${name} to appear in the IWP Required Documents draft`, 60000);
+    await waitForUi(() => add && !add.disabled, 'ADD button for selected drawings', 20000);
+    clickUi(add, 'ADD button for selected drawings');
+    await waitForUi(() => !revisionChooser(), 'revision chooser to close after adding drawings', 60000);
+    await waitForUi(() => {
+      const count = requiredDocumentsCount(wizard);
+      if (count !== beforeCount + selected.length) return null;
+      return count > 100 || selected.every(name => wizardDrawingRows(wizard, name, 'CURRENT').length === 1);
+    }, 'selected drawings to appear in the IWP Required Documents draft', 60000);
+    return { added: selected, skipped };
+  }
+
+  async function addCurrentRevisions(wizard, names) {
+    const added = [];
+    const skipped = [];
+    for (let offset = 0; offset < names.length; offset += 50) {
+      const batch = await addCurrentRevisionBatch(wizard, names.slice(offset, offset + 50));
+      added.push(...batch.added);
+      skipped.push(...batch.skipped);
+    }
+    return { added, skipped };
+  }
+
+  async function addCurrentRevision(wizard, name) {
+    const result = await addCurrentRevisions(wizard, [name]);
+    if (result.skipped.length) {
+      throw new Error(`${name}: ${result.skipped[0].reason}. The update was canceled.`);
+    }
   }
 
   function parseCsv(text) {
@@ -734,7 +826,7 @@
     heading.textContent = 'Build drawing associations';
     heading.style.cssText = 'font:700 18px Arial,sans-serif;margin:0 0 10px;';
     const help = document.createElement('p');
-    help.textContent = 'Upload a CSV with one IWP Name and Alt Doc Name pair per row. Repeat an IWP name to associate multiple drawings. Both names must match SDx exactly.';
+    help.textContent = 'Upload a CSV with one IWP Name and Alt Doc Name pair per row. Repeat an IWP name to associate multiple drawings. Names must match SDx exactly. Missing drawings are skipped and reported before the IWP is saved.';
     help.style.cssText = 'margin:0 0 12px;';
     const template = document.createElement('button');
     template.type = 'button';
@@ -819,6 +911,7 @@
     document.getElementById(`${PANEL_ID}-log`).replaceChildren();
     let completed = 0;
     let failed = 0;
+    let skippedDrawings = 0;
     let canceled = false;
     try {
       for (const group of groups) {
@@ -829,17 +922,14 @@
           setStatus(`Opening ${group.name}…`);
           wizard = await openUpdateWizard(group);
           await waitForRequiredDocumentsLoaded(wizard, `${group.name} Required Documents list`, 60000);
+          const originalCount = requiredDocumentsCount(wizard);
           const toAdd = [];
           const alreadyLinked = [];
           for (const altDocName of group.altDocNames) {
             const linked = wizardDrawingRows(wizard, altDocName, 'CURRENT');
             if (linked.length > 1) throw new Error(`${altDocName}: multiple current revisions are already associated with ${group.name}. This IWP was not saved.`);
             if (linked.length === 1) { alreadyLinked.push(altDocName); continue; }
-            setStatus(`Finding current drawing ${altDocName} for ${group.name}…`);
-            await addCurrentRevision(wizard, altDocName);
             toAdd.push(altDocName);
-            setStatus(`Added ${altDocName} to ${group.name}'s update draft.`);
-            setProgress(`${group.name}: added current drawing ${altDocName} to the update draft.`);
           }
           if (!toAdd.length) {
             await discardWizard(); wizard = null;
@@ -847,7 +937,22 @@
             completed++;
             continue;
           }
-          const accepted = window.confirm(`Associate drawings with ${group.name}?\n\n${toAdd.length} current drawing${toAdd.length === 1 ? '' : 's'} will be added to this IWP:\n\n${toAdd.join('\n')}\n\n${alreadyLinked.length ? `${alreadyLinked.length} drawing${alreadyLinked.length === 1 ? '' : 's'} already associated will be skipped.\n\n` : ''}Save this work package update in SDx?`);
+          setStatus(`Selecting ${toAdd.length} current drawing${toAdd.length === 1 ? '' : 's'} for ${group.name}…`);
+          const { added, skipped } = await addCurrentRevisions(wizard, toAdd);
+          skippedDrawings += skipped.length;
+          for (const item of skipped) {
+            setProgress(`WARNING: ${group.name}: skipped ${item.name} — ${item.reason}.`);
+          }
+          if (!added.length) {
+            await discardWizard(); wizard = null;
+            setProgress(`${group.name}: no new drawings were found to associate. No change saved.`);
+            completed++;
+            continue;
+          }
+          setStatus(`Added ${added.length} drawing${added.length === 1 ? '' : 's'} to ${group.name}'s update draft.`);
+          setProgress(`${group.name}: added ${added.join(', ')} to the update draft.`);
+          const skippedList = skipped.map(item => `${item.name}: ${item.reason}`).join('\n');
+          const accepted = window.confirm(`Associate drawings with ${group.name}?\n\n${added.length} current drawing${added.length === 1 ? '' : 's'} will be added to this IWP:\n\n${added.join('\n')}\n\n${skipped.length ? `${skipped.length} drawing${skipped.length === 1 ? '' : 's'} could not be found or selected and will be skipped:\n${skippedList}\n\n` : ''}${alreadyLinked.length ? `${alreadyLinked.length} drawing${alreadyLinked.length === 1 ? '' : 's'} already associated will be skipped.\n\n` : ''}Save this work package update in SDx?`);
           if (!accepted) {
             await discardWizard(); wizard = null;
             canceled = true;
@@ -863,15 +968,18 @@
           setStatus(`Verifying drawings saved to ${group.name}…`);
           wizard = await openUpdateWizard(group);
           await waitForRequiredDocumentsLoaded(wizard, `${group.name} saved Required Documents list`, 60000);
-          const saved = await waitForUi(() => toAdd.every(name => wizardDrawingRows(wizard, name, 'CURRENT').length > 0),
-            `${group.name} saved drawing associations`, 60000).catch(() => false);
+          const saved = await waitForUi(() => {
+            const count = requiredDocumentsCount(wizard);
+            if (count !== originalCount + added.length) return null;
+            return count > 100 || added.every(name => wizardDrawingRows(wizard, name, 'CURRENT').length === 1);
+          }, `${group.name} saved drawing associations`, 60000).catch(() => false);
           await discardWizard();
           wizard = null;
           if (!saved) {
-            throw new Error(`SDx closed the Update form, but ${toAdd.join(', ')} was not confirmed in ${group.name}'s saved Required Documents.`);
+            throw new Error(`SDx closed the Update form, but ${added.join(', ')} was not confirmed in ${group.name}'s saved Required Documents.`);
           }
           completed++;
-          setProgress(`${group.name}: saved ${toAdd.length} drawing association${toAdd.length === 1 ? '' : 's'}${alreadyLinked.length ? `; skipped ${alreadyLinked.length} already linked` : ''}.`);
+          setProgress(`${group.name}: saved ${added.length} drawing association${added.length === 1 ? '' : 's'}${alreadyLinked.length ? `; skipped ${alreadyLinked.length} already linked` : ''}${skipped.length ? `; skipped ${skipped.length} not found or selectable` : ''}.`);
         } catch (error) {
           if (wizard?.isConnected) await discardWizard().catch(() => {});
           failed++;
@@ -884,8 +992,8 @@
       const attempted = completed + failed;
       setStatus(canceled
         ? `Canceled after ${attempted} of ${groups.length} IWP${groups.length === 1 ? '' : 's'}.`
-        : `Finished: ${completed} IWP${completed === 1 ? '' : 's'} processed; ${failed} failed.`,
-      failed > 0);
+        : `Finished: ${completed} IWP${completed === 1 ? '' : 's'} processed; ${failed} failed; ${skippedDrawings} drawing${skippedDrawings === 1 ? '' : 's'} skipped.`,
+      failed > 0 || skippedDrawings > 0);
     } finally {
       busy = false;
       updateButton();
