@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SDX IWP Helper
 // @namespace    https://burnsmcd.com
-// @version      0.7.3
+// @version      0.7.4
 // @description  Associate drawing lists with existing work packages, stamp drawing ZIPs, flag superseded revisions, and update document associations.
 // @match        https://*.intergraphsmartcloud.com/*
 // @grant        none
@@ -18,7 +18,7 @@
   window.__sdxWpStampedDrawingsLoaded = true;
   try { if (window.self !== window.top) return; } catch (_) { return; }
 
-  const VERSION = '0.7.3';
+  const VERSION = '0.7.4';
   const BUTTON_ID = 'sdx-iwp-tools-button';
   const TOOLBAR_ID = 'sdx-iwp-helper-toolbar';
   const MENU_ID = 'sdx-iwp-helper-menu';
@@ -452,7 +452,8 @@
   }
 
   function wizardRows(wizard) {
-    return [...wizard.querySelectorAll('.related-items-panel tr[role="row"][data-kendo-grid-item-index]')];
+    return [...wizard.querySelectorAll('.related-items-panel .k-grid-content tbody tr')]
+      .filter(row => row.querySelectorAll('td').length > 2);
   }
 
   async function waitForRequiredDocumentsLoaded(wizard, description, timeout = 20000) {
@@ -476,6 +477,10 @@
 
   function rowHasRevisionStatus(row, status) {
     return [...row.querySelectorAll('td')].some(cell => clean(cell.textContent).toLowerCase() === status.toLowerCase());
+  }
+
+  function wizardDrawingRows(wizard, name, status) {
+    return wizardRows(wizard).filter(row => rowHasExactCellValue(row, name) && rowHasRevisionStatus(row, status));
   }
 
   function wizardButton(wizard, label) {
@@ -599,7 +604,7 @@
     await waitForUi(() => add && !add.disabled, `ADD button for ${name}`, 60000);
     clickUi(add, `ADD button for ${name}`);
     await waitForUi(() => !revisionChooser(), `revision chooser to close after adding ${name}`, 60000);
-    await waitForUi(() => wizardRows(wizard).some(row => wizardCell(row, 2) === name && /^current$/i.test(wizardCell(row, 7))),
+    await waitForUi(() => wizardDrawingRows(wizard, name, 'CURRENT').length > 0,
       `${name} to appear in the IWP Required Documents draft`, 60000);
   }
 
@@ -819,7 +824,7 @@
       for (const group of groups) {
         if (canceled) break;
         let wizard = null;
-      let saveAttempted = false;
+        let saveAttempted = false;
         try {
           setStatus(`Opening ${group.name}…`);
           wizard = await openUpdateWizard(group);
@@ -827,13 +832,14 @@
           const toAdd = [];
           const alreadyLinked = [];
           for (const altDocName of group.altDocNames) {
-            const linked = wizardRows(wizard).filter(row => wizardCell(row, 2) === altDocName && /^current$/i.test(wizardCell(row, 7)));
+            const linked = wizardDrawingRows(wizard, altDocName, 'CURRENT');
             if (linked.length > 1) throw new Error(`${altDocName}: multiple current revisions are already associated with ${group.name}. This IWP was not saved.`);
             if (linked.length === 1) { alreadyLinked.push(altDocName); continue; }
             setStatus(`Finding current drawing ${altDocName} for ${group.name}…`);
             await addCurrentRevision(wizard, altDocName);
             toAdd.push(altDocName);
-            setProgress(`${group.name}: found current drawing ${altDocName}.`);
+            setStatus(`Added ${altDocName} to ${group.name}'s update draft.`);
+            setProgress(`${group.name}: added current drawing ${altDocName} to the update draft.`);
           }
           if (!toAdd.length) {
             await discardWizard(); wizard = null;
@@ -849,6 +855,7 @@
             break;
           }
           saveAttempted = true;
+          setStatus(`Saving drawing associations for ${group.name}…`);
           clickUi(wizardButton(wizard, 'Update'), 'Update button');
           await waitForUi(() => !document.querySelector('sda-edit-obj-modal-view'), 'Update form to close after save', 60000);
           wizard = null;
@@ -856,12 +863,8 @@
           setStatus(`Verifying drawings saved to ${group.name}…`);
           wizard = await openUpdateWizard(group);
           await waitForRequiredDocumentsLoaded(wizard, `${group.name} saved Required Documents list`, 60000);
-          const saved = await waitForUi(() => {
-            const linked = new Set(wizardRows(wizard)
-              .filter(row => /^current$/i.test(wizardCell(row, 7)))
-              .map(row => wizardCell(row, 2)));
-            return toAdd.every(name => linked.has(name));
-          }, `${group.name} saved drawing associations`, 60000).catch(() => false);
+          const saved = await waitForUi(() => toAdd.every(name => wizardDrawingRows(wizard, name, 'CURRENT').length > 0),
+            `${group.name} saved drawing associations`, 60000).catch(() => false);
           await discardWizard();
           wizard = null;
           if (!saved) {
@@ -919,7 +922,7 @@
       wizard = await openUpdateWizard(wp);
       const rows = await waitForUi(() => wizardRows(wizard).length ? wizardRows(wizard) : null,
         'required documents');
-      const obsolete = rows.filter(row => /^superseded$/i.test(wizardCell(row, 7)));
+      const obsolete = rows.filter(row => rowHasRevisionStatus(row, 'SUPERSEDED'));
       if (obsolete.length !== report.count) {
         throw new Error(`${wp.name}: the Update form shows ${obsolete.length} superseded revisions but the SDx indicator shows ${report.count}. The update was canceled.`);
       }
@@ -940,12 +943,12 @@
       clickUi(unlink, 'Required Documents unlink control');
       await waitForUi(() => wizardRows(wizard).length === rows.length - obsolete.length,
         'superseded revisions to leave the update draft');
-      if (wizardRows(wizard).some(row => /^superseded$/i.test(wizardCell(row, 7)))) {
+      if (wizardRows(wizard).some(row => rowHasRevisionStatus(row, 'SUPERSEDED'))) {
         throw new Error('A superseded revision remains in the draft. The update was canceled.');
       }
       let added = 0;
       for (const name of names) {
-        const linkedCurrent = wizardRows(wizard).filter(row => wizardCell(row, 2) === name && /^current$/i.test(wizardCell(row, 7)));
+        const linkedCurrent = wizardDrawingRows(wizard, name, 'CURRENT');
         if (linkedCurrent.length > 1) throw new Error(`${name}: multiple current revisions are already linked. The update was canceled.`);
         if (!linkedCurrent.length) {
           setStatus(`Finding current revision of ${name}…`);
@@ -955,7 +958,7 @@
         setProgress(`${name}: current revision found.`);
       }
       if (wizardRows(wizard).length !== rows.length - obsolete.length + added ||
-          names.some(name => wizardRows(wizard).filter(row => wizardCell(row, 2) === name && /^current$/i.test(wizardCell(row, 7))).length !== 1)) {
+          names.some(name => wizardDrawingRows(wizard, name, 'CURRENT').length !== 1)) {
         throw new Error('The required documents draft changed unexpectedly. The update was canceled.');
       }
       const accepted = window.confirm(`Update ${wp.name}?\n\n${obsolete.length} superseded revision${obsolete.length === 1 ? '' : 's'} will be unlinked and the current revision of each document will be associated.\n\n${names.join('\n')}\n\nSave this work package update in SDx?`);
