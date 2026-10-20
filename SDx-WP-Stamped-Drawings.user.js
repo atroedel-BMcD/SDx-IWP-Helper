@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         SDX IWP Helper
 // @namespace    https://burnsmcd.com
-// @version      0.7.5
-// @description  Associate drawing lists with existing work packages, stamp drawing ZIPs, flag superseded revisions, and update document associations.
+// @version      0.8.0
+// @description  Bulk create and update work packages, associate drawing lists, stamp drawing ZIPs, and flag superseded revisions.
 // @match        https://*.intergraphsmartcloud.com/*
 // @grant        none
 // @require      https://cdnjs.cloudflare.com/ajax/libs/pdf-lib/1.17.1/pdf-lib.min.js
@@ -18,12 +18,13 @@
   window.__sdxWpStampedDrawingsLoaded = true;
   try { if (window.self !== window.top) return; } catch (_) { return; }
 
-  const VERSION = '0.7.5';
+  const VERSION = '0.8.0';
   const BUTTON_ID = 'sdx-iwp-tools-button';
   const TOOLBAR_ID = 'sdx-iwp-helper-toolbar';
   const MENU_ID = 'sdx-iwp-helper-menu';
   const DOWNLOAD_DIALOG_ID = 'sdx-iwp-download-dialog';
   const BULK_DIALOG_ID = 'sdx-iwp-bulk-dialog';
+  const BULK_CREATE_DIALOG_ID = 'sdx-iwp-bulk-create-dialog';
   const PANEL_ID = 'sdx-wp-stamped-zip-panel';
   const SETTINGS_KEY = 'sdx-iwp-helper-settings-v1';
   const CHECKBOX_SELECTOR = 'input[type="checkbox"].mdc-checkbox__native-control';
@@ -743,6 +744,208 @@
       entries.push({ wpName, altDocName });
     });
     return entries;
+  }
+
+  function parseWorkPackageCsv(text) {
+    const rows = parseCsv(text).filter(row => row.some(cell => clean(cell)));
+    if (rows.length < 2) throw new Error('The CSV must include the header row and at least one work package.');
+    const header = rows[0].map(cell => clean(cell).toLowerCase());
+    const nameColumn = header.indexOf('package number');
+    const descriptionColumn = header.indexOf('package title');
+    if (nameColumn < 0 || descriptionColumn < 0) {
+      throw new Error('Required headers are “Package Number” and “Package Title”.');
+    }
+    const entries = [];
+    const seen = new Set();
+    rows.slice(1).forEach((row, index) => {
+      const name = clean(row[nameColumn]);
+      const description = clean(row[descriptionColumn]);
+      if (!name) throw new Error(`CSV row ${index + 2} needs a Package Number.`);
+      if (name.length > 128) throw new Error(`CSV row ${index + 2} has a Package Number longer than 128 characters.`);
+      const key = name.toUpperCase();
+      if (seen.has(key)) throw new Error(`CSV row ${index + 2} duplicates Package Number “${name}”.`);
+      seen.add(key);
+      entries.push({ name, description, rowNumber: index + 2 });
+    });
+    return entries;
+  }
+
+  async function findExistingWorkPackageNames(entries, token, config) {
+    const existing = new Set();
+    const names = entries.map(entry => entry.name);
+    for (let offset = 0; offset < names.length; offset += 20) {
+      const batch = names.slice(offset, offset + 20);
+      const filter = batch.map(name => `Name eq '${name.replace(/'/g, "''")}'`).join(' or ');
+      const params = new URLSearchParams({ '$format': 'json', '$top': '500', '$filter': `(${filter})` });
+      const data = await apiJson(`${apiBase()}/WorkPackages?${params}`, token, config, { method: 'GET' });
+      (Array.isArray(data.value) ? data.value : []).forEach(row => {
+        const name = clean(row.Name || row.CI_Name);
+        if (name && batch.some(candidate => candidate.toUpperCase() === name.toUpperCase())) existing.add(name.toUpperCase());
+      });
+    }
+    return existing;
+  }
+
+  async function createGeneralWorkPackage(entry, token, config) {
+    const headers = {
+      Accept: 'application/json, application/vnd.intergraph.data+json',
+      Authorization: `Bearer ${token}`,
+      'Content-Type': 'application/json'
+    };
+    if (config) headers.SPFCreateConfigUID = config;
+    const response = await fetch(`${apiBase()}/WorkPackages`, {
+      method: 'POST', headers, credentials: 'include',
+      body: JSON.stringify({ Class: 'WorkPackage', Name: entry.name, Description: entry.description })
+    });
+    if (response.status === 401) throw new Error('SDx rejected the session token. Reload SDx and try again.');
+    if (!response.ok) {
+      let detail = '';
+      try { detail = clean(await response.text()).slice(0, 240); } catch (_) { /* use status only */ }
+      throw new Error(`SDx could not create “${entry.name}” (HTTP ${response.status})${detail ? `: ${detail}` : ''}.`);
+    }
+
+    const params = new URLSearchParams({ '$format': 'json', '$top': '10', '$filter': `Name eq '${entry.name.replace(/'/g, "''")}'` });
+    const data = await apiJson(`${apiBase()}/WorkPackages?${params}`, token, config, { method: 'GET' });
+    const matches = (Array.isArray(data.value) ? data.value : []).filter(row =>
+      clean(row.Name || row.CI_Name).toUpperCase() === entry.name.toUpperCase());
+    if (matches.length !== 1) {
+      throw new Error(`SDx accepted the create request for “${entry.name}”, but returned ${matches.length} exact records during verification. Stop and check SDx before retrying this name.`);
+    }
+    const created = matches[0];
+    if (clean(created.Description) !== entry.description) {
+      throw new Error(`SDx created “${entry.name}”, but its saved description did not match the CSV. Check the record before retrying.`);
+    }
+    return created;
+  }
+
+  function closeBulkCreateDialog() {
+    document.getElementById(BULK_CREATE_DIALOG_ID)?.remove();
+  }
+
+  function openBulkCreateDialog() {
+    if (busy || document.getElementById(BULK_CREATE_DIALOG_ID)) return;
+    closeMenu();
+    if (!onWorkPackageResultsPage()) {
+      openPanel();
+      setStatus('Open Results: General Work Packages to create IWPs from a CSV.', true);
+      return;
+    }
+    const token = tokenFromSession();
+    if (!token) {
+      openPanel();
+      setStatus('Could not read the SDx session token. Reload SDx and try again.', true);
+      return;
+    }
+    const overlay = document.createElement('div');
+    overlay.id = BULK_CREATE_DIALOG_ID;
+    overlay.style.cssText = 'position:fixed;inset:0;z-index:2147483647;display:flex;align-items:center;justify-content:center;background:#0008;padding:16px;font:13px/1.4 Arial,sans-serif;';
+    const dialog = document.createElement('div');
+    dialog.setAttribute('role', 'dialog');
+    dialog.setAttribute('aria-modal', 'true');
+    dialog.setAttribute('aria-label', 'Create IWPs from CSV');
+    dialog.style.cssText = 'width:560px;max-width:100%;max-height:90vh;overflow:auto;background:white;color:#242424;border-radius:5px;box-shadow:0 8px 28px #0005;padding:20px;';
+    const heading = document.createElement('h2');
+    heading.textContent = 'Create IWPs from CSV';
+    heading.style.cssText = 'font:700 18px Arial,sans-serif;margin:0 0 10px;';
+    const help = document.createElement('p');
+    help.textContent = 'Upload the IWP list. Package Number becomes the SDx Name and Package Title becomes the Description. Existing names are checked in the current project configuration before any records are created.';
+    help.style.cssText = 'margin:0 0 12px;';
+    const file = document.createElement('input');
+    file.type = 'file';
+    file.accept = '.csv,text/csv';
+    file.setAttribute('aria-label', 'Choose IWP list CSV');
+    file.style.cssText = 'display:block;margin:0 0 12px;max-width:100%;';
+    const preview = document.createElement('div');
+    preview.style.cssText = 'max-height:260px;overflow:auto;border:1px solid #ddd;padding:9px;margin:0 0 12px;white-space:pre-wrap;';
+    preview.textContent = 'Choose a CSV to preview its Package Number and Package Title rows.';
+    const actions = document.createElement('div');
+    actions.style.cssText = 'display:flex;justify-content:flex-end;gap:8px;';
+    const cancel = document.createElement('button');
+    cancel.type = 'button'; cancel.textContent = 'Cancel';
+    cancel.style.cssText = 'border:1px solid #aaa;border-radius:3px;background:#fff;padding:8px 12px;cursor:pointer;';
+    cancel.addEventListener('click', closeBulkCreateDialog);
+    const create = document.createElement('button');
+    create.type = 'button'; create.textContent = 'Check names'; create.disabled = true;
+    create.style.cssText = 'border:1px solid #1d64b7;border-radius:3px;background:#2b79d7;color:white;padding:8px 12px;font-weight:700;cursor:pointer;';
+    let entries = null;
+    let checked = false;
+    file.addEventListener('change', async () => {
+      entries = null; checked = false; create.disabled = true; create.textContent = 'Check names';
+      const selectedFile = file.files && file.files[0];
+      if (!selectedFile) { preview.textContent = 'Choose a CSV to preview its Package Number and Package Title rows.'; return; }
+      try {
+        entries = parseWorkPackageCsv(await selectedFile.text());
+        preview.textContent = `${entries.length} work package${entries.length === 1 ? '' : 's'} will be created:\n\n${entries.map(entry => `${entry.name}${entry.description ? ` — ${entry.description}` : ' — (no description)'}`).join('\n')}`;
+        create.disabled = false;
+      } catch (error) { preview.textContent = error?.message || String(error); }
+    });
+    create.addEventListener('click', async () => {
+      if (!entries) return;
+      if (checked) {
+        const names = entries.map(entry => entry.name).join('\n');
+        if (!window.confirm(`Create ${entries.length} General Work Package${entries.length === 1 ? '' : 's'} in the current SDx configuration?\n\n${names}\n\nThis will create records in SDx.`)) return;
+        const batch = [...entries];
+        closeBulkCreateDialog();
+        runBulkWorkPackageCreation(batch, token, currentEntityType()?.config?.key || null);
+        return;
+      }
+      create.disabled = true;
+      create.textContent = 'Checking…';
+      preview.textContent = 'Checking Package Number values against existing work packages in SDx…';
+      try {
+        const existing = await findExistingWorkPackageNames(entries, token, currentEntityType()?.config?.key || null);
+        const duplicates = entries.filter(entry => existing.has(entry.name.toUpperCase()));
+        if (duplicates.length) {
+          preview.textContent = `No IWPs were created. These Package Number values already exist in SDx:\n\n${duplicates.map(entry => `${entry.name} (CSV row ${entry.rowNumber})`).join('\n')}\n\nRemove or rename those rows, then upload the corrected CSV.`;
+          create.textContent = 'Check names again';
+          checked = false;
+        } else {
+          preview.textContent = `All ${entries.length} Package Number values are available in the current SDx configuration. Select Create IWPs to continue.`;
+          create.textContent = 'Create IWPs';
+          checked = true;
+        }
+        create.disabled = false;
+      } catch (error) {
+        preview.textContent = error?.message || String(error);
+        create.textContent = 'Check names again';
+        create.disabled = false;
+      }
+    });
+    actions.append(cancel, create);
+    dialog.append(heading, help, file, preview, actions);
+    overlay.appendChild(dialog);
+    overlay.addEventListener('pointerdown', event => { if (event.target === overlay) closeBulkCreateDialog(); });
+    document.body.appendChild(overlay);
+    cancel.focus();
+  }
+
+  async function runBulkWorkPackageCreation(entries, token, config) {
+    if (busy) return;
+    busy = true;
+    closeMenu();
+    updateButton();
+    openPanel();
+    let created = 0;
+    try {
+      setStatus('Rechecking Package Number values before creating records…');
+      const existing = await findExistingWorkPackageNames(entries, token, config);
+      const duplicates = entries.filter(entry => existing.has(entry.name.toUpperCase()));
+      if (duplicates.length) {
+        throw new Error(`No records were created in this run. These names appeared in SDx after the first check: ${duplicates.map(entry => entry.name).join(', ')}.`);
+      }
+      for (const entry of entries) {
+        setStatus(`Creating ${entry.name} (${created + 1} of ${entries.length})…`);
+        await createGeneralWorkPackage(entry, token, config);
+        created++;
+        setStatus(`Created and verified ${created} of ${entries.length} IWPs.`, false);
+      }
+      setStatus(`Finished: created and verified all ${created} IWPs. Refresh the SDx results to see them.`, false);
+    } catch (error) {
+      setStatus(`Stopped after ${created} verified IWP${created === 1 ? '' : 's'}: ${error?.message || String(error)} Do not retry a name until you check it in SDx.`, true);
+    } finally {
+      busy = false;
+      updateButton();
+    }
   }
 
   function downloadAssociationTemplate() {
@@ -1596,6 +1799,14 @@
     const bulkHelp = document.createElement('div');
     bulkHelp.textContent = 'Adds matching drawings to each IWP’s Required Documents. Review each IWP’s drawing updates before saving.';
     bulkHelp.style.cssText = 'color:#555;font-size:11px;margin:7px 0 11px;';
+    const createIwps = document.createElement('button');
+    createIwps.type = 'button';
+    createIwps.textContent = 'Bulk Create IWPs from CSV';
+    createIwps.style.cssText = 'display:flex!important;box-sizing:border-box!important;width:100%!important;height:auto!important;min-height:44px!important;align-items:center;justify-content:center;border:1px solid #2b79d7;border-radius:3px;background:#fff;color:#12579f;padding:9px;cursor:pointer;font:700 13px/1.25 Arial,sans-serif!important;text-align:center;white-space:normal!important;margin-top:8px;';
+    createIwps.addEventListener('click', openBulkCreateDialog);
+    const createIwpsHelp = document.createElement('div');
+    createIwpsHelp.textContent = 'Creates one General Work Package per CSV row using Package Number and Package Title. Existing names are blocked before creation.';
+    createIwpsHelp.style.cssText = 'color:#555;font-size:11px;margin:7px 0 11px;';
     const update = document.createElement('button');
     update.type = 'button';
     update.style.cssText = 'display:flex!important;box-sizing:border-box!important;width:100%!important;height:auto!important;min-height:44px!important;align-items:center;justify-content:center;border:1px solid #2b79d7;border-radius:3px;background:#fff;color:#12579f;padding:9px;cursor:pointer;font:700 13px/1.25 Arial,sans-serif!important;text-align:center;white-space:normal!important;margin-top:8px;';
@@ -1609,6 +1820,8 @@
     updateHelp.textContent = 'Updates one work package at a time. The current revisions are reviewed before SDx saves the change.';
     updateHelp.style.cssText = 'color:#555;font-size:11px;margin:7px 0 11px;';
     menu.appendChild(updateHelp);
+    menu.appendChild(createIwps);
+    menu.appendChild(createIwpsHelp);
     menu.appendChild(bulk);
     menu.appendChild(bulkHelp);
 
