@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SDX IWP Helper
 // @namespace    https://burnsmcd.com
-// @version      0.8.0
+// @version      0.8.1
 // @description  Bulk create and update work packages, associate drawing lists, stamp drawing ZIPs, and flag superseded revisions.
 // @match        https://*.intergraphsmartcloud.com/*
 // @grant        none
@@ -18,7 +18,7 @@
   window.__sdxWpStampedDrawingsLoaded = true;
   try { if (window.self !== window.top) return; } catch (_) { return; }
 
-  const VERSION = '0.8.0';
+  const VERSION = '0.8.1';
   const BUTTON_ID = 'sdx-iwp-tools-button';
   const TOOLBAR_ID = 'sdx-iwp-helper-toolbar';
   const MENU_ID = 'sdx-iwp-helper-menu';
@@ -822,6 +822,18 @@
     document.getElementById(BULK_CREATE_DIALOG_ID)?.remove();
   }
 
+  function downloadWorkPackageTemplate() {
+    const blob = new Blob(['Package Number,Package Title\r\n'], { type: 'text/csv;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = 'IWP_Creation_Template.csv';
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 10000);
+  }
+
   function openBulkCreateDialog() {
     if (busy || document.getElementById(BULK_CREATE_DIALOG_ID)) return;
     closeMenu();
@@ -850,6 +862,11 @@
     const help = document.createElement('p');
     help.textContent = 'Upload the IWP list. Package Number becomes the SDx Name and Package Title becomes the Description. Existing names are checked in the current project configuration before any records are created.';
     help.style.cssText = 'margin:0 0 12px;';
+    const template = document.createElement('button');
+    template.type = 'button';
+    template.textContent = 'Download CSV template';
+    template.style.cssText = 'border:1px solid #2b79d7;border-radius:3px;background:#fff;color:#12579f;padding:7px 10px;font-weight:700;cursor:pointer;margin-bottom:12px;';
+    template.addEventListener('click', downloadWorkPackageTemplate);
     const file = document.createElement('input');
     file.type = 'file';
     file.accept = '.csv,text/csv';
@@ -912,7 +929,7 @@
       }
     });
     actions.append(cancel, create);
-    dialog.append(heading, help, file, preview, actions);
+    dialog.append(heading, help, template, file, preview, actions);
     overlay.appendChild(dialog);
     overlay.addEventListener('pointerdown', event => { if (event.target === overlay) closeBulkCreateDialog(); });
     document.body.appendChild(overlay);

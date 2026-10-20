@@ -2,7 +2,7 @@
 
 A Tampermonkey userscript for SDx work packages (IWPs). It bulk creates IWPs from a CSV, associates drawing lists with existing IWPs, highlights packages with superseded documents, downloads stamped PDF drawings as ZIP files, and helps replace superseded document associations with current revisions.
 
-The current userscript version is **0.8.0**. The script is in [SDx-WP-Stamped-Drawings.user.js](SDx-WP-Stamped-Drawings.user.js).
+The current userscript version is **0.8.1**. The script is in [SDx-WP-Stamped-Drawings.user.js](SDx-WP-Stamped-Drawings.user.js).
 
 ## Install
 
@@ -30,7 +30,7 @@ Only documents with an attached PDF file are included in stamped ZIPs. Other fil
 ## Create IWPs from a CSV
 
 1. Open **Results: General Work Packages** in SDx and choose **IWP TOOLS** → **Bulk Create IWPs from CSV**.
-2. Upload a CSV containing `Package Number` and `Package Title` columns. Other columns are ignored. Each nonblank data row creates one General Work Package; Package Number becomes **Name** and Package Title becomes **Description**.
+2. Select **Download CSV template** for a blank file with the required headers, or upload a CSV containing `Package Number` and `Package Title` columns. Other columns are ignored. Each nonblank data row creates one General Work Package; Package Number becomes **Name** and Package Title becomes **Description**.
 3. Review the preview and select **Check names**. If any package number already exists in the current SDx configuration, the helper creates nothing; remove or rename the duplicate rows and upload again.
 4. Select **Create IWPs**, review the final confirmation, and confirm. The helper creates packages in row order, verifies each saved Name and Description, and stops at the first error. Previously verified packages remain saved. Check SDx before retrying a name if creation stopped with an error.
 5. Refresh the results page to see the new packages.
