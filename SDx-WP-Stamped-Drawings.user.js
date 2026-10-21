@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SDX IWP Helper
 // @namespace    https://burnsmcd.com
-// @version      0.8.1
+// @version      0.8.2
 // @description  Bulk create and update work packages, associate drawing lists, stamp drawing ZIPs, and flag superseded revisions.
 // @match        https://*.intergraphsmartcloud.com/*
 // @grant        none
@@ -18,7 +18,7 @@
   window.__sdxWpStampedDrawingsLoaded = true;
   try { if (window.self !== window.top) return; } catch (_) { return; }
 
-  const VERSION = '0.8.1';
+  const VERSION = '0.8.2';
   const BUTTON_ID = 'sdx-iwp-tools-button';
   const TOOLBAR_ID = 'sdx-iwp-helper-toolbar';
   const MENU_ID = 'sdx-iwp-helper-menu';
@@ -1395,6 +1395,9 @@
     return PDFDocument.load(bytes, { ignoreEncryption: false }).then(async pdf => {
       const font = await pdf.embedFont(StandardFonts.HelveticaBold);
       const label = `WP # ${wpNumber} CONTROLLED`;
+      const stampedAt = new Date();
+      const stampDate = `${String(stampedAt.getMonth() + 1).padStart(2, '0')}/${String(stampedAt.getDate()).padStart(2, '0')}/${String(stampedAt.getFullYear()).slice(-2)}`;
+      const dateLabel = `STAMPED ${stampDate}`;
       const pages = pdf.getPages();
       for (const page of pages) {
         const { width, height } = page.getSize();
@@ -1428,6 +1431,14 @@
           font,
           color: rgb(0.84, 0.04, 0.08),
           wordBreaks: []
+        });
+        const dateFontSize = fontSize * 0.75;
+        page.drawText(dateLabel, {
+          x: width - margin - font.widthOfTextAtSize(dateLabel, dateFontSize),
+          y: y - fontSize * 1.05,
+          size: dateFontSize,
+          font,
+          color: rgb(0.84, 0.04, 0.08)
         });
       }
       return pdf.save();

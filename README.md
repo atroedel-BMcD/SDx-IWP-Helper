@@ -2,7 +2,7 @@
 
 A Tampermonkey userscript for SDx work packages (IWPs). It bulk creates IWPs from a CSV, associates drawing lists with existing IWPs, highlights packages with superseded documents, downloads stamped PDF drawings as ZIP files, and helps replace superseded document associations with current revisions.
 
-The current userscript version is **0.8.1**. The script is in [SDx-WP-Stamped-Drawings.user.js](SDx-WP-Stamped-Drawings.user.js).
+The current userscript version is **0.8.2**. The script is in [SDx-WP-Stamped-Drawings.user.js](SDx-WP-Stamped-Drawings.user.js).
 
 ## Install
 
@@ -18,7 +18,7 @@ The script runs on matching `intergraphsmartcloud.com` pages. It requires access
 | --- | --- |
 | Bulk IWP creation | Uploads a CSV with `Package Number` and `Package Title`, checks every package number against the current SDx configuration, then creates one General Work Package per row using Package Number as Name and Package Title as Description. Creation is sequential and each saved package is verified before continuing. |
 | Superseded row highlighting | Checks SDx's **Superseded Documents** widget for work packages visible in the results grid. Packages with a count above zero are yellow when **Planned** and red when **Active** or **Executed**, by default. |
-| Stamp and download | Creates a separate ZIP for each selected work package. Each attached PDF is stamped in red at the upper right of every page with `WP # <work package name> CONTROLLED`. Every ZIP also includes a blue-banded, landscape 11×17 controlled drawing list with Alt Doc Name, Drawing Title, and Rev; long lists continue on additional pages. |
+| Stamp and download | Creates a separate ZIP for each selected work package. Each attached PDF is stamped in red at the upper right of every page with `WP # <work package name> CONTROLLED` and the local stamping date beneath it as `STAMPED MM/DD/YY`. Every ZIP also includes a blue-banded, landscape 11×17 controlled drawing list with Alt Doc Name, Drawing Title, and Rev; long lists continue on additional pages. |
 | Bulk IWP Drawing Association | Downloads a two-column CSV template (`IWP Name`, `Alt Doc Name`), checks that each exact IWP name exists in SDx and is visible in the current results grid, then uses each IWP's Update form to select current drawing revisions and add them together. Missing drawings and already-associated current drawings are skipped and reported. Each IWP change needs confirmation before SDx saves it. |
 | Superseded download guard | Rechecks the selected package's superseded count before stamping. By default, any superseded document blocks that package's ZIP and displays a warning. |
 | Per-download override | The download dialog shows this unchecked option only when SDx identifies superseded documents in a selected package. It names the affected packages. An override includes their superseded versions for that run, with a large, diagonal, translucent red **SUPERSEDED** mark on those PDF pages. The option must be selected again for every download. |
