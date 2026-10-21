@@ -1,12 +1,13 @@
 // ==UserScript==
 // @name         SDX IWP Helper
 // @namespace    https://burnsmcd.com
-// @version      0.8.2
+// @version      0.9.0
 // @description  Bulk create and update work packages, associate drawing lists, stamp drawing ZIPs, and flag superseded revisions.
 // @match        https://*.intergraphsmartcloud.com/*
 // @grant        none
 // @require      https://cdnjs.cloudflare.com/ajax/libs/pdf-lib/1.17.1/pdf-lib.min.js
 // @require      https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js
+// @require      https://cdnjs.cloudflare.com/ajax/libs/qrcode/1.5.1/qrcode.min.js
 // @updateURL    https://raw.githubusercontent.com/atroedel-BMcD/SDx-IWP-Helper/main/SDx-WP-Stamped-Drawings.user.js
 // @downloadURL  https://raw.githubusercontent.com/atroedel-BMcD/SDx-IWP-Helper/main/SDx-WP-Stamped-Drawings.user.js
 // @run-at       document-idle
@@ -18,7 +19,7 @@
   window.__sdxWpStampedDrawingsLoaded = true;
   try { if (window.self !== window.top) return; } catch (_) { return; }
 
-  const VERSION = '0.8.2';
+  const VERSION = '0.9.0';
   const BUTTON_ID = 'sdx-iwp-tools-button';
   const TOOLBAR_ID = 'sdx-iwp-helper-toolbar';
   const MENU_ID = 'sdx-iwp-helper-menu';
@@ -1474,11 +1475,30 @@
     return lines;
   }
 
-  async function createControlledDrawingList(workPackage, pdfs) {
+  function workPackageDetailUrl(id, config) {
+    if (!id || !config) throw new Error('Could not build the SDx IWP link for the controlled drawing list. No ZIP was created.');
+    const queryFilter = {
+      filters: [], pageSize: 100, page: 1,
+      ignoreQueryBySelectedConfig: false, isLoaded: false, ignoreEffectivity: false,
+      returnMarkedForDeleteObjects: false, relatedItemFilters: [],
+      entityType: 'WorkPackages', resolveDocumentsToVersion: true
+    };
+    const hash = `#/objects;queryFilter=${encodeURIComponent(JSON.stringify(queryFilter))};config=${encodeURIComponent(JSON.stringify([config]))}/detail/${encodeURIComponent(id)}`;
+    return `${location.origin}${location.pathname}${hash}`;
+  }
+
+  async function createControlledDrawingList(workPackage, pdfs, detailUrl) {
     const { PDFDocument, StandardFonts, rgb, degrees } = PDFLib;
+    if (!window.QRCode || typeof window.QRCode.toDataURL !== 'function') {
+      throw new Error('The QR code library did not load. No controlled drawing list or ZIP was created.');
+    }
     const pdf = await PDFDocument.create();
     const regular = await pdf.embedFont(StandardFonts.Helvetica);
     const bold = await pdf.embedFont(StandardFonts.HelveticaBold);
+    const qrDataUrl = await window.QRCode.toDataURL(detailUrl, {
+      errorCorrectionLevel: 'M', margin: 4, width: 600
+    });
+    const qrImage = await pdf.embedPng(qrDataUrl);
     const pageWidth = 1224; // 17 in at 72 points per inch
     const pageHeight = 792; // 11 in at 72 points per inch
     const bandWidth = 46;
@@ -1488,7 +1508,7 @@
     const tableTop = pageHeight - 28;
     const headerHeight = 34;
     const rowHeight = 23;
-    const tableBottom = 34;
+    const tableBottom = 166; // Reserve space for the scannable IWP link on every page.
     const rowsPerPage = Math.floor((tableTop - headerHeight - tableBottom) / rowHeight);
     const altWidth = (tableRight - tableLeft) * 0.39;
     const titleWidth = (tableRight - tableLeft) * 0.49;
@@ -1551,6 +1571,17 @@
         page.drawText(item.rev, { x: columns[2] + 7, y: textY, size: revSize, font: regular, color: black });
       });
       page.drawLine({ start: { x: tableLeft, y: pageTableBottom }, end: { x: tableRight, y: pageTableBottom }, thickness: 1.1, color: black });
+      page.drawImage(qrImage, { x: tableLeft, y: 28, width: 128, height: 128 });
+      const qrTextLeft = tableLeft + 148;
+      page.drawText('SCAN TO VERIFY LIVE IWP STATUS', {
+        x: qrTextLeft, y: 132, size: 13, font: bold, color: blue
+      });
+      page.drawText('The QR code opens this IWP in SDx with its right panel and current superseded count.', {
+        x: qrTextLeft, y: 105, size: 9.5, font: regular, color: black
+      });
+      page.drawText('Sign in to SDx to view it. The live count may change after this list is downloaded.', {
+        x: qrTextLeft, y: 87, size: 9.5, font: regular, color: black
+      });
       page.drawText(`PAGE ${pageIndex + 1} OF ${pageCount}`, {
         x: tableRight - 92, y: 17, size: 8, font: regular, color: black
       });
@@ -1622,7 +1653,8 @@
       zip.file(name, stamped);
     }
     setStatus(`Creating controlled drawing list for ${wp}…`);
-    const drawingList = await createControlledDrawingList(wp, pdfs);
+    const detailUrl = workPackageDetailUrl(workPackageIds.get(packageKey(wp, config)), config);
+    const drawingList = await createControlledDrawingList(wp, pdfs, detailUrl);
     zip.file(`${safeFilename(wp)}_Controlled_Drawing_List.pdf`, drawingList);
     setStatus(`Building ZIP for ${wp}…`);
     const blob = await zip.generateAsync({ type: 'blob', compression: 'DEFLATE', compressionOptions: { level: 5 } });
