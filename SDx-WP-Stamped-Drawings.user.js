@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SDX IWP Helper
 // @namespace    https://burnsmcd.com
-// @version      0.9.1
+// @version      0.10.0
 // @description  Bulk create and update work packages, associate drawing lists, stamp drawing ZIPs, and flag superseded revisions.
 // @match        https://*.intergraphsmartcloud.com/*
 // @grant        none
@@ -46,7 +46,7 @@ var qrcode=function(){function i(t,r){function a(t,r){l=function(t){for(var r=ne
   window.__sdxWpStampedDrawingsLoaded = true;
   try { if (window.self !== window.top) return; } catch (_) { return; }
 
-  const VERSION = '0.9.1';
+  const VERSION = '0.10.0';
   const BUTTON_ID = 'sdx-iwp-tools-button';
   const TOOLBAR_ID = 'sdx-iwp-helper-toolbar';
   const MENU_ID = 'sdx-iwp-helper-menu';
@@ -862,6 +862,60 @@ var qrcode=function(){function i(t,r){function a(t,r){l=function(t){for(var r=ne
     setTimeout(() => URL.revokeObjectURL(url), 10000);
   }
 
+  function createCsvDropZone(fileInput, onSelection) {
+    const zone = document.createElement('div');
+    zone.style.cssText = 'border:2px dashed #8bb7e8;border-radius:4px;background:#f5f9ff;padding:12px;margin:0 0 12px;';
+    const prompt = document.createElement('div');
+    prompt.textContent = 'Drop one CSV file here, or browse for a file:';
+    prompt.style.cssText = 'font-weight:700;color:#12579f;';
+    const selected = document.createElement('div');
+    selected.setAttribute('aria-live', 'polite');
+    selected.style.cssText = 'margin-top:6px;color:#444;overflow-wrap:anywhere;';
+    fileInput.style.cssText = 'display:block;max-width:100%;margin:8px 0 0;';
+    zone.append(prompt, fileInput, selected);
+
+    function selectFiles(files) {
+      const chosen = Array.from(files || []);
+      const error = chosen.length > 1 ? 'Choose one CSV file at a time.'
+        : chosen.length === 1 && !/\.csv$/i.test(chosen[0].name) ? 'Only .csv files are supported.' : null;
+      selected.textContent = error || (chosen.length ? `Selected: ${chosen[0].name}` : '');
+      onSelection(error ? null : chosen[0] || null, error);
+    }
+
+    fileInput.addEventListener('change', () => selectFiles(fileInput.files));
+    let dragDepth = 0;
+    const highlight = active => {
+      zone.style.borderColor = active ? '#2b79d7' : '#8bb7e8';
+      zone.style.background = active ? '#e7f1ff' : '#f5f9ff';
+    };
+    zone.addEventListener('dragenter', event => {
+      event.preventDefault();
+      event.stopPropagation();
+      dragDepth += 1;
+      highlight(true);
+    });
+    zone.addEventListener('dragover', event => {
+      event.preventDefault();
+      event.stopPropagation();
+      if (event.dataTransfer) event.dataTransfer.dropEffect = 'copy';
+    });
+    zone.addEventListener('dragleave', event => {
+      event.preventDefault();
+      event.stopPropagation();
+      dragDepth = Math.max(0, dragDepth - 1);
+      if (!dragDepth) highlight(false);
+    });
+    zone.addEventListener('drop', event => {
+      event.preventDefault();
+      event.stopPropagation();
+      dragDepth = 0;
+      highlight(false);
+      fileInput.value = '';
+      selectFiles(event.dataTransfer?.files);
+    });
+    return zone;
+  }
+
   function openBulkCreateDialog() {
     if (busy || document.getElementById(BULK_CREATE_DIALOG_ID)) return;
     closeMenu();
@@ -899,7 +953,6 @@ var qrcode=function(){function i(t,r){function a(t,r){l=function(t){for(var r=ne
     file.type = 'file';
     file.accept = '.csv,text/csv';
     file.setAttribute('aria-label', 'Choose IWP list CSV');
-    file.style.cssText = 'display:block;margin:0 0 12px;max-width:100%;';
     const preview = document.createElement('div');
     preview.style.cssText = 'max-height:260px;overflow:auto;border:1px solid #ddd;padding:9px;margin:0 0 12px;white-space:pre-wrap;';
     preview.textContent = 'Choose a CSV to preview its Package Number and Package Title rows.';
@@ -914,15 +967,19 @@ var qrcode=function(){function i(t,r){function a(t,r){l=function(t){for(var r=ne
     create.style.cssText = 'border:1px solid #1d64b7;border-radius:3px;background:#2b79d7;color:white;padding:8px 12px;font-weight:700;cursor:pointer;';
     let entries = null;
     let checked = false;
-    file.addEventListener('change', async () => {
+    let selectionSerial = 0;
+    const upload = createCsvDropZone(file, async (selectedFile, uploadError) => {
+      const selection = ++selectionSerial;
       entries = null; checked = false; create.disabled = true; create.textContent = 'Check names';
-      const selectedFile = file.files && file.files[0];
+      if (uploadError) { preview.textContent = uploadError; return; }
       if (!selectedFile) { preview.textContent = 'Choose a CSV to preview its Package Number and Package Title rows.'; return; }
       try {
-        entries = parseWorkPackageCsv(await selectedFile.text());
+        const parsed = parseWorkPackageCsv(await selectedFile.text());
+        if (selection !== selectionSerial) return;
+        entries = parsed;
         preview.textContent = `${entries.length} work package${entries.length === 1 ? '' : 's'} will be created:\n\n${entries.map(entry => `${entry.name}${entry.description ? ` — ${entry.description}` : ' — (no description)'}`).join('\n')}`;
         create.disabled = false;
-      } catch (error) { preview.textContent = error?.message || String(error); }
+      } catch (error) { if (selection === selectionSerial) preview.textContent = error?.message || String(error); }
     });
     create.addEventListener('click', async () => {
       if (!entries) return;
@@ -957,7 +1014,7 @@ var qrcode=function(){function i(t,r){function a(t,r){l=function(t){for(var r=ne
       }
     });
     actions.append(cancel, create);
-    dialog.append(heading, help, template, file, preview, actions);
+    dialog.append(heading, help, template, upload, preview, actions);
     overlay.appendChild(dialog);
     overlay.addEventListener('pointerdown', event => { if (event.target === overlay) closeBulkCreateDialog(); });
     document.body.appendChild(overlay);
@@ -1085,7 +1142,6 @@ var qrcode=function(){function i(t,r){function a(t,r){l=function(t){for(var r=ne
     file.type = 'file';
     file.accept = '.csv,text/csv';
     file.setAttribute('aria-label', 'Choose drawing association CSV');
-    file.style.cssText = 'display:block;margin:0 0 12px;max-width:100%;';
     const preview = document.createElement('div');
     preview.style.cssText = 'max-height:220px;overflow:auto;border:1px solid #ddd;padding:9px;margin:0 0 12px;white-space:pre-wrap;';
     preview.textContent = 'Choose a CSV to preview its IWP and drawing rows.';
@@ -1100,17 +1156,21 @@ var qrcode=function(){function i(t,r){function a(t,r){l=function(t){for(var r=ne
     proceed.style.cssText = 'border:1px solid #1d64b7;border-radius:3px;background:#2b79d7;color:white;padding:8px 12px;font-weight:700;cursor:pointer;';
     let entries = null;
     let validatedGroups = null;
-    file.addEventListener('change', async () => {
+    let selectionSerial = 0;
+    const upload = createCsvDropZone(file, async (selectedFile, uploadError) => {
+      const selection = ++selectionSerial;
       entries = null; validatedGroups = null; proceed.disabled = true; proceed.textContent = 'Check IWP names';
-      const selectedFile = file.files && file.files[0];
+      if (uploadError) { preview.textContent = uploadError; return; }
       if (!selectedFile) { preview.textContent = 'Choose a CSV to preview its IWP and drawing rows.'; return; }
       try {
-        entries = parseAssociationCsv(await selectedFile.text());
+        const parsed = parseAssociationCsv(await selectedFile.text());
+        if (selection !== selectionSerial) return;
+        entries = parsed;
         const groups = associationGroups(entries);
         const lines = groups.map(group => `${group.name} (${group.altDocNames.length} drawing${group.altDocNames.length === 1 ? '' : 's'})`).join('\n');
         preview.textContent = `${entries.length} drawing row${entries.length === 1 ? '' : 's'} across ${groups.length} IWP${groups.length === 1 ? '' : 's'}:\n\n${lines}`;
         proceed.disabled = false;
-      } catch (error) { preview.textContent = error?.message || String(error); }
+      } catch (error) { if (selection === selectionSerial) preview.textContent = error?.message || String(error); }
     });
     proceed.addEventListener('click', async () => {
       if (!entries) return;
@@ -1143,7 +1203,7 @@ var qrcode=function(){function i(t,r){function a(t,r){l=function(t){for(var r=ne
       }
     });
     actions.append(cancel, proceed);
-    dialog.append(heading, help, template, file, preview, actions);
+    dialog.append(heading, help, template, upload, preview, actions);
     overlay.appendChild(dialog);
     overlay.addEventListener('pointerdown', event => { if (event.target === overlay) closeBulkDialog(); });
     document.body.appendChild(overlay);

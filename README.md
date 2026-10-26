@@ -2,7 +2,7 @@
 
 A Tampermonkey userscript for SDx work packages (IWPs). It bulk creates IWPs from a CSV, associates drawing lists with existing IWPs, highlights packages with superseded documents, downloads stamped PDF drawings as ZIP files, and helps replace superseded document associations with current revisions.
 
-The current userscript version is **0.9.1**. The script is in [SDx-WP-Stamped-Drawings.user.js](SDx-WP-Stamped-Drawings.user.js).
+The current userscript version is **0.10.0**. The script is in [SDx-WP-Stamped-Drawings.user.js](SDx-WP-Stamped-Drawings.user.js).
 
 ## Install
 
@@ -16,10 +16,10 @@ The script runs on matching `intergraphsmartcloud.com` pages. It requires access
 
 | Feature | What it does |
 | --- | --- |
-| Bulk IWP creation | Uploads a CSV with `Package Number` and `Package Title`, checks every package number against the current SDx configuration, then creates one General Work Package per row using Package Number as Name and Package Title as Description. Creation is sequential and each saved package is verified before continuing. |
+| Bulk IWP creation | Accepts a CSV with `Package Number` and `Package Title` by drag and drop or file picker, checks every package number against the current SDx configuration, then creates one General Work Package per row using Package Number as Name and Package Title as Description. Creation is sequential and each saved package is verified before continuing. |
 | Superseded row highlighting | Checks SDx's **Superseded Documents** widget for work packages visible in the results grid. Packages with a count above zero are yellow when **Planned** and red when **Active** or **Executed**, by default. |
 | Stamp and download | Creates a separate ZIP for each selected work package. Each attached PDF is stamped in red at the upper right of every page with `WP # <work package name> CONTROLLED` and the local stamping date beneath it as `STAMPED MM/DD/YY`. Every ZIP also includes a blue-banded, landscape 11×17 controlled drawing list with Alt Doc Name, Drawing Title, Rev, and a QR code linking to that IWP's SDx detail page with the right panel; long lists continue on additional pages. |
-| Bulk IWP Drawing Association | Downloads a two-column CSV template (`IWP Name`, `Alt Doc Name`), checks that each exact IWP name exists in SDx and is visible in the current results grid, then uses each IWP's Update form to select current drawing revisions and add them together. Missing drawings and already-associated current drawings are skipped and reported. Each IWP change needs confirmation before SDx saves it. |
+| Bulk IWP Drawing Association | Accepts a two-column CSV (`IWP Name`, `Alt Doc Name`) by drag and drop or file picker, checks that each exact IWP name exists in SDx and is visible in the current results grid, then uses each IWP's Update form to select current drawing revisions and add them together. Missing drawings and already-associated current drawings are skipped and reported. Each IWP change needs confirmation before SDx saves it. |
 | Superseded download guard | Rechecks the selected package's superseded count before stamping. By default, any superseded document blocks that package's ZIP and displays a warning. |
 | Per-download override | The download dialog shows this unchecked option only when SDx identifies superseded documents in a selected package. It names the affected packages. An override includes their superseded versions for that run, with a large, diagonal, translucent red **SUPERSEDED** mark on those PDF pages. The option must be selected again for every download. |
 | Update superseded documents | For one package at a time, opens SDx's Update form, removes its superseded Required Documents associations, finds and adds the matching current revisions, and asks for confirmation before saving. |
@@ -30,7 +30,7 @@ Only documents with an attached PDF file are included in stamped ZIPs. Other fil
 ## Create IWPs from a CSV
 
 1. Open **Results: General Work Packages** in SDx and choose **IWP TOOLS** → **Bulk Create IWPs from CSV**.
-2. Select **Download CSV template** for a blank file with the required headers, or upload a CSV containing `Package Number` and `Package Title` columns. Other columns are ignored. Each nonblank data row creates one General Work Package; Package Number becomes **Name** and Package Title becomes **Description**.
+2. Select **Download CSV template** for a blank file with the required headers, then drop one `.csv` file onto the upload area or use its file picker. The CSV must contain `Package Number` and `Package Title` columns. Other columns are ignored. Each nonblank data row creates one General Work Package; Package Number becomes **Name** and Package Title becomes **Description**.
 3. Review the preview and select **Check names**. If any package number already exists in the current SDx configuration, the helper creates nothing; remove or rename the duplicate rows and upload again.
 4. Select **Create IWPs**, review the final confirmation, and confirm. The helper creates packages in row order, verifies each saved Name and Description, and stops at the first error. Previously verified packages remain saved. Check SDx before retrying a name if creation stopped with an error.
 5. Refresh the results page to see the new packages.
@@ -69,7 +69,7 @@ The helper stops before saving if the superseded counts disagree, a current revi
 1. Open **Results: General Work Packages** and make sure the IWPs you plan to use are visible in the current results grid.
 2. Click **IWP TOOLS** → **Bulk IWP Drawing Association** and download the template.
 3. Fill in one row per drawing. Repeat the IWP name for each drawing in that package. The required headers are `IWP Name` and `Alt Doc Name`.
-4. Upload the CSV and choose **Check IWP names**. The helper requires an exact IWP name match in SDx and in the visible grid. If any IWP is missing or not visible, no associations are changed; correct the name or adjust the results grid and retry.
+4. Drop one `.csv` file onto the upload area or use its file picker, review the preview, and choose **Check IWP names**. The helper requires an exact IWP name match in SDx and in the visible grid. If any IWP is missing or not visible, no associations are changed; correct the name or adjust the results grid and retry.
 5. Choose **Associate drawings**. For each IWP, the helper searches SDx for one current Document Revision whose Alt Doc Name matches exactly, including when the IWP currently has no Required Documents. It keeps matching drawings selected across searches, then uses one **ADD** action for the group. A current drawing already associated with the IWP is skipped. A missing, ambiguous, or unselectable drawing is skipped and named in the status panel; the remaining drawings continue.
 6. Review the confirmation for each IWP, including the names skipped, and choose **OK** to save the matched associations in SDx. If no new drawings match, the helper discards the draft without saving. After a save, it reopens the IWP to verify that SDx saved the drawings. Cancel stops the remaining IWPs; earlier IWPs you confirmed stay saved.
 
