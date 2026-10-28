@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SDX IWP Helper
 // @namespace    https://burnsmcd.com
-// @version      0.10.1
+// @version      0.10.2
 // @description  Bulk create and update work packages, associate drawing lists, stamp drawing ZIPs, and flag superseded revisions.
 // @match        https://*.intergraphsmartcloud.com/*
 // @grant        none
@@ -46,7 +46,7 @@ var qrcode=function(){function i(t,r){function a(t,r){l=function(t){for(var r=ne
   window.__sdxWpStampedDrawingsLoaded = true;
   try { if (window.self !== window.top) return; } catch (_) { return; }
 
-  const VERSION = '0.10.1';
+  const VERSION = '0.10.2';
   const BUTTON_ID = 'sdx-iwp-tools-button';
   const TOOLBAR_ID = 'sdx-iwp-helper-toolbar';
   const MENU_ID = 'sdx-iwp-helper-menu';
@@ -814,7 +814,22 @@ var qrcode=function(){function i(t,r){function a(t,r){l=function(t){for(var r=ne
     return existing;
   }
 
-  async function createGeneralWorkPackage(entry, token, config) {
+  async function findGeneralWorkPackageClassification(token) {
+    const params = new URLSearchParams({
+      '$format': 'json',
+      '$top': '100',
+      '$filter': "Class eq 'SDAWorkPackageClassification'"
+    });
+    const data = await apiJson(`${apiBase()}/Objects?${params}`, token, null, { method: 'GET' });
+    const matches = (Array.isArray(data.value) ? data.value : []).filter(row =>
+      /^General(?: Work Package)?$/i.test(clean(row.Name)) && clean(row.OBID || row.Id));
+    if (matches.length !== 1) {
+      throw new Error(`Could not identify one General Work Package classification in SDx (found ${matches.length}). No IWPs were created.`);
+    }
+    return clean(matches[0].OBID || matches[0].Id);
+  }
+
+  async function createGeneralWorkPackage(entry, token, config, classificationId) {
     const headers = {
       Accept: 'application/json, application/vnd.intergraph.data+json',
       Authorization: `Bearer ${token}`,
@@ -823,7 +838,12 @@ var qrcode=function(){function i(t,r){function a(t,r){l=function(t){for(var r=ne
     if (config) headers.SPFCreateConfigUID = config;
     const response = await fetch(`${apiBase()}/Objects`, {
       method: 'POST', headers, credentials: 'include',
-      body: JSON.stringify({ Class: 'SDAWorkPackage', Name: entry.name, Description: entry.description })
+      body: JSON.stringify({
+        Class: 'SDAWorkPackage',
+        Name: entry.name,
+        Description: entry.description,
+        'SPFPrimaryClassification_21@odata.bind': [`${apiBase()}/Objects('${classificationId}')`]
+      })
     });
     if (response.status === 401) throw new Error('SDx rejected the session token. Reload SDx and try again.');
     if (!response.ok) {
@@ -1035,9 +1055,11 @@ var qrcode=function(){function i(t,r){function a(t,r){l=function(t){for(var r=ne
       if (duplicates.length) {
         throw new Error(`No records were created in this run. These names appeared in SDx after the first check: ${duplicates.map(entry => entry.name).join(', ')}.`);
       }
+      setStatus('Finding the General Work Package classification in SDx…');
+      const classificationId = await findGeneralWorkPackageClassification(token);
       for (const entry of entries) {
         setStatus(`Creating ${entry.name} (${created + 1} of ${entries.length})…`);
-        await createGeneralWorkPackage(entry, token, config);
+        await createGeneralWorkPackage(entry, token, config, classificationId);
         created++;
         setStatus(`Created and verified ${created} of ${entries.length} IWPs.`, false);
       }
