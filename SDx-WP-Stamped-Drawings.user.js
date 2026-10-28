@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SDX IWP Helper
 // @namespace    https://burnsmcd.com
-// @version      0.10.0
+// @version      0.10.1
 // @description  Bulk create and update work packages, associate drawing lists, stamp drawing ZIPs, and flag superseded revisions.
 // @match        https://*.intergraphsmartcloud.com/*
 // @grant        none
@@ -46,7 +46,7 @@ var qrcode=function(){function i(t,r){function a(t,r){l=function(t){for(var r=ne
   window.__sdxWpStampedDrawingsLoaded = true;
   try { if (window.self !== window.top) return; } catch (_) { return; }
 
-  const VERSION = '0.10.0';
+  const VERSION = '0.10.1';
   const BUTTON_ID = 'sdx-iwp-tools-button';
   const TOOLBAR_ID = 'sdx-iwp-helper-toolbar';
   const MENU_ID = 'sdx-iwp-helper-menu';
@@ -821,9 +821,9 @@ var qrcode=function(){function i(t,r){function a(t,r){l=function(t){for(var r=ne
       'Content-Type': 'application/json'
     };
     if (config) headers.SPFCreateConfigUID = config;
-    const response = await fetch(`${apiBase()}/WorkPackages`, {
+    const response = await fetch(`${apiBase()}/Objects`, {
       method: 'POST', headers, credentials: 'include',
-      body: JSON.stringify({ Class: 'WorkPackage', Name: entry.name, Description: entry.description })
+      body: JSON.stringify({ Class: 'SDAWorkPackage', Name: entry.name, Description: entry.description })
     });
     if (response.status === 401) throw new Error('SDx rejected the session token. Reload SDx and try again.');
     if (!response.ok) {
