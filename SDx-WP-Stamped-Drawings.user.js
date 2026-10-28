@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SDX IWP Helper
 // @namespace    https://burnsmcd.com
-// @version      0.10.3
+// @version      0.10.4
 // @description  Bulk create and update work packages, associate drawing lists, stamp drawing ZIPs, and flag superseded revisions.
 // @match        https://*.intergraphsmartcloud.com/*
 // @grant        none
@@ -46,7 +46,7 @@ var qrcode=function(){function i(t,r){function a(t,r){l=function(t){for(var r=ne
   window.__sdxWpStampedDrawingsLoaded = true;
   try { if (window.self !== window.top) return; } catch (_) { return; }
 
-  const VERSION = '0.10.3';
+  const VERSION = '0.10.4';
   const BUTTON_ID = 'sdx-iwp-tools-button';
   const TOOLBAR_ID = 'sdx-iwp-helper-toolbar';
   const MENU_ID = 'sdx-iwp-helper-menu';
@@ -827,6 +827,14 @@ var qrcode=function(){function i(t,r){function a(t,r){l=function(t){for(var r=ne
       throw new Error('Close the existing SDx Create form before running Bulk Create. No new IWP was saved.');
     }
     clickUi(document.getElementById('side_bar_featureset-btn'), 'Work Packages feature set button');
+    const menu = await waitForUi(() => {
+      const create = document.getElementById('SDACreateGeneralWorkPackage');
+      if (create && create.getBoundingClientRect().width > 0) return { create };
+      const workPackages = [...document.querySelectorAll('button')].find(button =>
+        clean(button.textContent) === 'Work Packages' && button.getBoundingClientRect().width > 0);
+      return workPackages && { workPackages };
+    }, 'Work Packages create menu');
+    if (menu.workPackages) clickUi(menu.workPackages, 'Work Packages feature set');
     const create = await waitForUi(() => {
       const button = document.getElementById('SDACreateGeneralWorkPackage');
       return button && button.getBoundingClientRect().width > 0 && button;
