@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SDX IWP Helper
 // @namespace    https://burnsmcd.com
-// @version      0.10.2
+// @version      0.10.3
 // @description  Bulk create and update work packages, associate drawing lists, stamp drawing ZIPs, and flag superseded revisions.
 // @match        https://*.intergraphsmartcloud.com/*
 // @grant        none
@@ -46,7 +46,7 @@ var qrcode=function(){function i(t,r){function a(t,r){l=function(t){for(var r=ne
   window.__sdxWpStampedDrawingsLoaded = true;
   try { if (window.self !== window.top) return; } catch (_) { return; }
 
-  const VERSION = '0.10.2';
+  const VERSION = '0.10.3';
   const BUTTON_ID = 'sdx-iwp-tools-button';
   const TOOLBAR_ID = 'sdx-iwp-helper-toolbar';
   const MENU_ID = 'sdx-iwp-helper-menu';
@@ -464,17 +464,17 @@ var qrcode=function(){function i(t,r){function a(t,r){l=function(t){for(var r=ne
       if (result) return result;
       await sleep(150);
     }
-    throw new Error(`Timed out waiting for SDx ${description}. No update was saved.`);
+    throw new Error(`Timed out waiting for SDx ${description}. Check SDx before retrying.`);
   }
 
   function clickUi(element, description) {
-    if (!element) throw new Error(`Could not find SDx ${description}. No update was saved.`);
+    if (!element) throw new Error(`Could not find SDx ${description}. Check SDx before retrying.`);
     if (typeof element.click === 'function') element.click();
     else element.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
   }
 
   function setUiInput(input, value) {
-    if (!input) throw new Error('Could not find the SDx document revision search field. No update was saved.');
+    if (!input) throw new Error('Could not find the SDx input field. Check SDx before retrying.');
     Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(input, value);
     input.dispatchEvent(new Event('input', { bubbles: true }));
     input.dispatchEvent(new Event('change', { bubbles: true }));
@@ -779,21 +779,24 @@ var qrcode=function(){function i(t,r){function a(t,r){l=function(t){for(var r=ne
     if (rows.length < 2) throw new Error('The CSV must include the header row and at least one work package.');
     const header = rows[0].map(cell => clean(cell).toLowerCase());
     const nameColumn = header.indexOf('package number');
-    const descriptionColumn = header.indexOf('package title');
+    const descriptionColumn = header.indexOf('description') >= 0
+      ? header.indexOf('description') : header.indexOf('package title');
+    const contractColumn = header.indexOf('contract number');
     if (nameColumn < 0 || descriptionColumn < 0) {
-      throw new Error('Required headers are “Package Number” and “Package Title”.');
+      throw new Error('Required headers are “Package Number” and “Description”. Older CSVs may use “Package Title” in place of “Description”.');
     }
     const entries = [];
     const seen = new Set();
     rows.slice(1).forEach((row, index) => {
       const name = clean(row[nameColumn]);
       const description = clean(row[descriptionColumn]);
+      const contractNumber = contractColumn >= 0 ? clean(row[contractColumn]) : '';
       if (!name) throw new Error(`CSV row ${index + 2} needs a Package Number.`);
       if (name.length > 128) throw new Error(`CSV row ${index + 2} has a Package Number longer than 128 characters.`);
       const key = name.toUpperCase();
       if (seen.has(key)) throw new Error(`CSV row ${index + 2} duplicates Package Number “${name}”.`);
       seen.add(key);
-      entries.push({ name, description, rowNumber: index + 2 });
+      entries.push({ name, description, contractNumber, rowNumber: index + 2 });
     });
     return entries;
   }
@@ -814,43 +817,63 @@ var qrcode=function(){function i(t,r){function a(t,r){l=function(t){for(var r=ne
     return existing;
   }
 
-  async function findGeneralWorkPackageClassification(token) {
-    const params = new URLSearchParams({
-      '$format': 'json',
-      '$top': '100',
-      '$filter': "Class eq 'SDAWorkPackageClassification'"
-    });
-    const data = await apiJson(`${apiBase()}/Objects?${params}`, token, null, { method: 'GET' });
-    const matches = (Array.isArray(data.value) ? data.value : []).filter(row =>
-      /^General(?: Work Package)?$/i.test(clean(row.Name)) && clean(row.OBID || row.Id));
-    if (matches.length !== 1) {
-      throw new Error(`Could not identify one General Work Package classification in SDx (found ${matches.length}). No IWPs were created.`);
-    }
-    return clean(matches[0].OBID || matches[0].Id);
+  function createFormField(wizard, label) {
+    return [...wizard.querySelectorAll('.form__content')].find(field =>
+      clean(field.querySelector('.form__title')?.textContent) === `${label}:`);
   }
 
-  async function createGeneralWorkPackage(entry, token, config, classificationId) {
-    const headers = {
-      Accept: 'application/json, application/vnd.intergraph.data+json',
-      Authorization: `Bearer ${token}`,
-      'Content-Type': 'application/json'
-    };
-    if (config) headers.SPFCreateConfigUID = config;
-    const response = await fetch(`${apiBase()}/Objects`, {
-      method: 'POST', headers, credentials: 'include',
-      body: JSON.stringify({
-        Class: 'SDAWorkPackage',
-        Name: entry.name,
-        Description: entry.description,
-        'SPFPrimaryClassification_21@odata.bind': [`${apiBase()}/Objects('${classificationId}')`]
-      })
-    });
-    if (response.status === 401) throw new Error('SDx rejected the session token. Reload SDx and try again.');
-    if (!response.ok) {
-      let detail = '';
-      try { detail = clean(await response.text()).slice(0, 240); } catch (_) { /* use status only */ }
-      throw new Error(`SDx could not create “${entry.name}” (HTTP ${response.status})${detail ? `: ${detail}` : ''}.`);
+  async function openGeneralWorkPackageCreateForm() {
+    if (document.querySelector('sda-create-class-obj-modal')) {
+      throw new Error('Close the existing SDx Create form before running Bulk Create. No new IWP was saved.');
     }
+    clickUi(document.getElementById('side_bar_featureset-btn'), 'Work Packages feature set button');
+    const create = await waitForUi(() => {
+      const button = document.getElementById('SDACreateGeneralWorkPackage');
+      return button && button.getBoundingClientRect().width > 0 && button;
+    },
+      'Create General Work Package action');
+    clickUi(create, 'Create General Work Package action');
+    return waitForUi(() => [...document.querySelectorAll('sda-create-class-obj-modal')].find(wizard =>
+      clean(wizard.querySelector('h1')?.textContent) === 'New General Work Package'),
+    'New General Work Package form');
+  }
+
+  async function createGeneralWorkPackage(entry, token, config) {
+    const wizard = await openGeneralWorkPackageCreateForm();
+    const fields = await waitForUi(() => {
+      const name = createFormField(wizard, 'Name')?.querySelector('input.string-input');
+      const description = createFormField(wizard, 'Description')?.querySelector('input.string-input');
+      const status = createFormField(wizard, 'Status')?.querySelector('select.enum-select');
+      const organization = createFormField(wizard, 'Originating organization')?.querySelector('select.rel-pick__select');
+      const contract = createFormField(wizard, 'Contract')?.querySelector('select.rel-pick__select');
+      return name && description && status && organization && contract &&
+        { name, description, status, organization, contract };
+    }, `General Work Package fields for “${entry.name}”`);
+    const { name, description, status, organization, contract } = fields;
+    await waitForUi(() => clean(status.selectedOptions[0]?.textContent).toUpperCase().startsWith('PLANNED') &&
+      clean(organization.selectedOptions[0]?.textContent) && organization.value,
+    `to prefill Planned status and Originating organization for “${entry.name}”`);
+    setUiInput(name, entry.name);
+    setUiInput(description, entry.description);
+    if (entry.contractNumber) {
+      await waitForUi(() => contract.options.length > 2, 'Contract options');
+      const matches = [...contract.options].filter(option =>
+        clean(option.textContent).split(',')[0].toUpperCase() === entry.contractNumber.toUpperCase());
+      if (matches.length !== 1) {
+        throw new Error(`Contract Number “${entry.contractNumber}” matched ${matches.length} SDx contracts for “${entry.name}”. No IWP was saved.`);
+      }
+      contract.value = matches[0].value;
+      contract.dispatchEvent(new Event('change', { bubbles: true }));
+      if (contract.value !== matches[0].value) {
+        throw new Error(`SDx did not accept Contract Number “${entry.contractNumber}” for “${entry.name}”. No IWP was saved.`);
+      }
+    }
+    const finish = await waitForUi(() => {
+      const button = wizard.querySelector('button.uxt-wizard-button--create');
+      return button && !button.disabled && button;
+    }, `Finish button for “${entry.name}”`);
+    clickUi(finish, 'General Work Package Finish button');
+    await waitForUi(() => !document.contains(wizard), `to save “${entry.name}”`, 60000);
 
     const params = new URLSearchParams({ '$format': 'json', '$top': '10', '$filter': `Name eq '${entry.name.replace(/'/g, "''")}'` });
     const data = await apiJson(`${apiBase()}/WorkPackages?${params}`, token, config, { method: 'GET' });
@@ -871,7 +894,7 @@ var qrcode=function(){function i(t,r){function a(t,r){l=function(t){for(var r=ne
   }
 
   function downloadWorkPackageTemplate() {
-    const blob = new Blob(['Package Number,Package Title\r\n'], { type: 'text/csv;charset=utf-8' });
+    const blob = new Blob(['Package Number,Description,Contract Number\r\n'], { type: 'text/csv;charset=utf-8' });
     const url = URL.createObjectURL(blob);
     const anchor = document.createElement('a');
     anchor.href = url;
@@ -962,7 +985,7 @@ var qrcode=function(){function i(t,r){function a(t,r){l=function(t){for(var r=ne
     heading.textContent = 'Create IWPs from CSV';
     heading.style.cssText = 'font:700 18px Arial,sans-serif;margin:0 0 10px;';
     const help = document.createElement('p');
-    help.textContent = 'Upload the IWP list. Package Number becomes the SDx Name and Package Title becomes the Description. Existing names are checked in the current project configuration before any records are created.';
+    help.textContent = 'Upload the IWP list. Package Number becomes the SDx Name, Description becomes the SDx Description, and Contract Number links the contract. Existing names are checked in the current project configuration before any records are created.';
     help.style.cssText = 'margin:0 0 12px;';
     const template = document.createElement('button');
     template.type = 'button';
@@ -975,7 +998,7 @@ var qrcode=function(){function i(t,r){function a(t,r){l=function(t){for(var r=ne
     file.setAttribute('aria-label', 'Choose IWP list CSV');
     const preview = document.createElement('div');
     preview.style.cssText = 'max-height:260px;overflow:auto;border:1px solid #ddd;padding:9px;margin:0 0 12px;white-space:pre-wrap;';
-    preview.textContent = 'Choose a CSV to preview its Package Number and Package Title rows.';
+    preview.textContent = 'Choose a CSV to preview its Package Number, Description, and Contract Number rows.';
     const actions = document.createElement('div');
     actions.style.cssText = 'display:flex;justify-content:flex-end;gap:8px;';
     const cancel = document.createElement('button');
@@ -992,12 +1015,12 @@ var qrcode=function(){function i(t,r){function a(t,r){l=function(t){for(var r=ne
       const selection = ++selectionSerial;
       entries = null; checked = false; create.disabled = true; create.textContent = 'Check names';
       if (uploadError) { preview.textContent = uploadError; return; }
-      if (!selectedFile) { preview.textContent = 'Choose a CSV to preview its Package Number and Package Title rows.'; return; }
+      if (!selectedFile) { preview.textContent = 'Choose a CSV to preview its Package Number, Description, and Contract Number rows.'; return; }
       try {
         const parsed = parseWorkPackageCsv(await selectedFile.text());
         if (selection !== selectionSerial) return;
         entries = parsed;
-        preview.textContent = `${entries.length} work package${entries.length === 1 ? '' : 's'} will be created:\n\n${entries.map(entry => `${entry.name}${entry.description ? ` — ${entry.description}` : ' — (no description)'}`).join('\n')}`;
+        preview.textContent = `${entries.length} work package${entries.length === 1 ? '' : 's'} will be created:\n\n${entries.map(entry => `${entry.name}${entry.description ? ` — ${entry.description}` : ' — (no description)'}${entry.contractNumber ? ` | Contract: ${entry.contractNumber}` : ''}`).join('\n')}`;
         create.disabled = false;
       } catch (error) { if (selection === selectionSerial) preview.textContent = error?.message || String(error); }
     });
@@ -1055,11 +1078,9 @@ var qrcode=function(){function i(t,r){function a(t,r){l=function(t){for(var r=ne
       if (duplicates.length) {
         throw new Error(`No records were created in this run. These names appeared in SDx after the first check: ${duplicates.map(entry => entry.name).join(', ')}.`);
       }
-      setStatus('Finding the General Work Package classification in SDx…');
-      const classificationId = await findGeneralWorkPackageClassification(token);
       for (const entry of entries) {
         setStatus(`Creating ${entry.name} (${created + 1} of ${entries.length})…`);
-        await createGeneralWorkPackage(entry, token, config, classificationId);
+        await createGeneralWorkPackage(entry, token, config);
         created++;
         setStatus(`Created and verified ${created} of ${entries.length} IWPs.`, false);
       }
@@ -1991,7 +2012,7 @@ var qrcode=function(){function i(t,r){function a(t,r){l=function(t){for(var r=ne
     createIwps.style.cssText = 'display:flex!important;box-sizing:border-box!important;width:100%!important;height:auto!important;min-height:44px!important;align-items:center;justify-content:center;border:1px solid #2b79d7;border-radius:3px;background:#fff;color:#12579f;padding:9px;cursor:pointer;font:700 13px/1.25 Arial,sans-serif!important;text-align:center;white-space:normal!important;margin-top:8px;';
     createIwps.addEventListener('click', openBulkCreateDialog);
     const createIwpsHelp = document.createElement('div');
-    createIwpsHelp.textContent = 'Creates one General Work Package per CSV row using Package Number and Package Title. Existing names are blocked before creation.';
+    createIwpsHelp.textContent = 'Creates General Work Packages from Package Number, Description, and optional Contract Number columns using the SDx Create form. Existing names are blocked before creation.';
     createIwpsHelp.style.cssText = 'color:#555;font-size:11px;margin:7px 0 11px;';
     const update = document.createElement('button');
     update.type = 'button';

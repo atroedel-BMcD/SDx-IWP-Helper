@@ -2,7 +2,7 @@
 
 A Tampermonkey userscript for SDx work packages (IWPs). It bulk creates IWPs from a CSV, associates drawing lists with existing IWPs, highlights packages with superseded documents, downloads stamped PDF drawings as ZIP files, and helps replace superseded document associations with current revisions.
 
-The current userscript version is **0.10.2**. The script is in [SDx-WP-Stamped-Drawings.user.js](SDx-WP-Stamped-Drawings.user.js).
+The current userscript version is **0.10.3**. The script is in [SDx-WP-Stamped-Drawings.user.js](SDx-WP-Stamped-Drawings.user.js).
 
 ## Install
 
@@ -16,7 +16,7 @@ The script runs on matching `intergraphsmartcloud.com` pages. It requires access
 
 | Feature | What it does |
 | --- | --- |
-| Bulk IWP creation | Accepts a CSV with `Package Number` and `Package Title` by drag and drop or file picker, checks every package number against the current SDx configuration, then creates one General Work Package per row using Package Number as Name and Package Title as Description. Creation is sequential and each saved package is verified before continuing. |
+| Bulk IWP creation | Accepts a CSV with `Package Number`, `Description`, and optional `Contract Number` by drag and drop or file picker. Package Number becomes the SDx Name; Description becomes the SDx Description. The helper checks names in the current configuration, then creates each package through SDx's native General Work Package form so its Planned status and originating organization are populated. Each saved package is verified before continuing. |
 | Superseded row highlighting | Checks SDx's **Superseded Documents** widget for work packages visible in the results grid. Packages with a count above zero are yellow when **Planned** and red when **Active** or **Executed**, by default. |
 | Stamp and download | Creates a separate ZIP for each selected work package. Each attached PDF is stamped in red at the upper right of every page with `WP # <work package name> CONTROLLED` and the local stamping date beneath it as `STAMPED MM/DD/YY`. Every ZIP also includes a blue-banded, landscape 11×17 controlled drawing list with Alt Doc Name, Drawing Title, Rev, and a QR code linking to that IWP's SDx detail page with the right panel; long lists continue on additional pages. |
 | Bulk IWP Drawing Association | Accepts a two-column CSV (`IWP Name`, `Alt Doc Name`) by drag and drop or file picker, checks that each exact IWP name exists in SDx and is visible in the current results grid, then uses each IWP's Update form to select current drawing revisions and add them together. Missing drawings and already-associated current drawings are skipped and reported. Each IWP change needs confirmation before SDx saves it. |
@@ -30,12 +30,12 @@ Only documents with an attached PDF file are included in stamped ZIPs. Other fil
 ## Create IWPs from a CSV
 
 1. Open **Results: General Work Packages** in SDx and choose **IWP TOOLS** → **Bulk Create IWPs from CSV**.
-2. Select **Download CSV template** for a blank file with the required headers, then drop one `.csv` file onto the upload area or use its file picker. The CSV must contain `Package Number` and `Package Title` columns. Other columns are ignored. Each nonblank data row creates one General Work Package; Package Number becomes **Name** and Package Title becomes **Description**.
+2. Select **Download CSV template** for a blank file with `Package Number,Description,Contract Number` headers, then drop one `.csv` file onto the upload area or use its file picker. `Package Number` is required and becomes the SDx **Name**. `Description` becomes the SDx **Description** and may be blank. If supplied, `Contract Number` must match exactly one contract available in SDx's create form for the current configuration; leave it blank to create a package without a contract. Older CSVs with `Package Title` instead of `Description` still work; that column is treated as Description.
 3. Review the preview and select **Check names**. If any package number already exists in the current SDx configuration, the helper creates nothing; remove or rename the duplicate rows and upload again.
-4. Select **Create IWPs**, review the final confirmation, and confirm. The helper creates packages in row order, verifies each saved Name and Description, and stops at the first error. Previously verified packages remain saved. Check SDx before retrying a name if creation stopped with an error.
+4. Select **Create IWPs**, review the final confirmation, and confirm. The helper opens SDx's native General Work Package form for each row, confirms its default Planned status and originating organization, fills Name and Description, selects the requested contract when provided, and saves. It verifies each saved Name and Description before continuing and stops at the first error. Previously verified packages remain saved. Check SDx before retrying a name if creation stopped with an error.
 5. Refresh the results page to see the new packages.
 
-This workflow creates General Work Packages only. It does not populate the other CSV columns, add drawings, or set discipline, contract, or owning group.
+This workflow creates General Work Packages only. It does not add drawings or set discipline or owning group.
 
 ## Download stamped drawings
 
