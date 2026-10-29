@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SDX IWP Helper
 // @namespace    https://burnsmcd.com
-// @version      0.10.5
+// @version      0.10.6
 // @description  Bulk create and update work packages, associate drawing lists, stamp drawing ZIPs, and flag superseded revisions.
 // @match        https://*.intergraphsmartcloud.com/*
 // @grant        none
@@ -46,7 +46,7 @@ var qrcode=function(){function i(t,r){function a(t,r){l=function(t){for(var r=ne
   window.__sdxWpStampedDrawingsLoaded = true;
   try { if (window.self !== window.top) return; } catch (_) { return; }
 
-  const VERSION = '0.10.5';
+  const VERSION = '0.10.6';
   const BUTTON_ID = 'sdx-iwp-tools-button';
   const TOOLBAR_ID = 'sdx-iwp-helper-toolbar';
   const MENU_ID = 'sdx-iwp-helper-menu';
@@ -457,7 +457,7 @@ var qrcode=function(){function i(t,r){function a(t,r){l=function(t){for(var r=ne
     return selected.length ? selected : [sidePanelWorkPackage()].filter(Boolean);
   }
 
-  async function waitForUi(check, description, timeout = 20000) {
+  async function waitForUi(check, description, timeout = 45000) {
     const until = Date.now() + timeout;
     while (Date.now() < until) {
       const result = check();
@@ -714,8 +714,10 @@ var qrcode=function(){function i(t,r){function a(t,r){l=function(t){for(var r=ne
   async function addCurrentRevisions(wizard, names) {
     const added = [];
     const skipped = [];
-    for (let offset = 0; offset < names.length; offset += 50) {
-      const batch = await addCurrentRevisionBatch(wizard, names.slice(offset, offset + 50));
+    // SDx can silently drop selections when too many revisions are added from one
+    // chooser session. Keep each ADD operation small and verify it before continuing.
+    for (let offset = 0; offset < names.length; offset += 2) {
+      const batch = await addCurrentRevisionBatch(wizard, names.slice(offset, offset + 2));
       added.push(...batch.added);
       skipped.push(...batch.skipped);
     }
@@ -843,7 +845,7 @@ var qrcode=function(){function i(t,r){function a(t,r){l=function(t){for(var r=ne
     clickUi(create, 'Create General Work Package action');
     return waitForUi(() => [...document.querySelectorAll('sda-create-class-obj-modal')].find(wizard =>
       clean(wizard.querySelector('h1')?.textContent) === 'New General Work Package'),
-    'New General Work Package form');
+    'New General Work Package form', 60000);
   }
 
   async function createGeneralWorkPackage(entry, token, config) {

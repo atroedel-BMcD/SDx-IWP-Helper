@@ -2,7 +2,7 @@
 
 A Tampermonkey userscript for SDx work packages (IWPs). It bulk creates IWPs from a CSV, associates drawing lists with existing IWPs, highlights packages with superseded documents, downloads stamped PDF drawings as ZIP files, and helps replace superseded document associations with current revisions.
 
-The current userscript version is **0.10.5**. The script is in [SDx-WP-Stamped-Drawings.user.js](SDx-WP-Stamped-Drawings.user.js).
+The current userscript version is **0.10.6**. The script is in [SDx-WP-Stamped-Drawings.user.js](SDx-WP-Stamped-Drawings.user.js).
 
 ## Install
 
@@ -70,7 +70,7 @@ The helper stops before saving if the superseded counts disagree, a current revi
 2. Click **IWP TOOLS** → **Bulk IWP Drawing Association** and download the template.
 3. Fill in one row per drawing. Repeat the IWP name for each drawing in that package. The required headers are `IWP Name` and `Alt Doc Name`.
 4. Drop one `.csv` file onto the upload area or use its file picker, review the preview, and choose **Check IWP names**. The helper requires an exact IWP name match in SDx and in the visible grid. If any IWP is missing or not visible, no associations are changed; correct the name or adjust the results grid and retry.
-5. Choose **Associate drawings**. For each IWP, the helper searches SDx for one current Document Revision whose Alt Doc Name matches exactly, including when the IWP currently has no Required Documents. It keeps matching drawings selected across searches, then uses one **ADD** action for the group. A current drawing already associated with the IWP is skipped. A missing, ambiguous, or unselectable drawing is skipped and named in the status panel; the remaining drawings continue.
+5. Choose **Associate drawings**. For each IWP, the helper searches SDx for one current Document Revision whose Alt Doc Name matches exactly, including when the IWP currently has no Required Documents. It adds drawings in groups of two and checks each group in the draft before continuing. A current drawing already associated with the IWP is skipped. A missing, ambiguous, or unselectable drawing is skipped and named in the status panel; the remaining drawings continue.
 6. Review the confirmation for each IWP, including the names skipped, and choose **OK** to save the matched associations in SDx. If no new drawings match, the helper discards the draft without saving. After a save, it reopens the IWP to verify that SDx saved the drawings. Cancel stops the remaining IWPs; earlier IWPs you confirmed stay saved.
 
 The CSV upload only adds Required Documents associations. It does not create IWPs, replace superseded revisions, or change drawing records. Keep the IWP names and Alt Doc Names exactly as they appear in SDx.
