@@ -1,12 +1,12 @@
 // ==UserScript==
 // @name         SDX IWP Helper
 // @namespace    https://burnsmcd.com
-// @version      0.10.4
+// @version      0.10.5
 // @description  Bulk create and update work packages, associate drawing lists, stamp drawing ZIPs, and flag superseded revisions.
 // @match        https://*.intergraphsmartcloud.com/*
 // @grant        none
 // @require      https://cdnjs.cloudflare.com/ajax/libs/pdf-lib/1.17.1/pdf-lib.min.js
-// @require      https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js
+// @require      https://cdn.jsdelivr.net/npm/fflate@0.8.3/umd/index.js
 // @updateURL    https://raw.githubusercontent.com/atroedel-BMcD/SDx-IWP-Helper/main/SDx-WP-Stamped-Drawings.user.js
 // @downloadURL  https://raw.githubusercontent.com/atroedel-BMcD/SDx-IWP-Helper/main/SDx-WP-Stamped-Drawings.user.js
 // @run-at       document-idle
@@ -46,7 +46,7 @@ var qrcode=function(){function i(t,r){function a(t,r){l=function(t){for(var r=ne
   window.__sdxWpStampedDrawingsLoaded = true;
   try { if (window.self !== window.top) return; } catch (_) { return; }
 
-  const VERSION = '0.10.4';
+  const VERSION = '0.10.5';
   const BUTTON_ID = 'sdx-iwp-tools-button';
   const TOOLBAR_ID = 'sdx-iwp-helper-toolbar';
   const MENU_ID = 'sdx-iwp-helper-menu';
@@ -1771,7 +1771,7 @@ var qrcode=function(){function i(t,r){function a(t,r){l=function(t){for(var r=ne
     if (!rows.length) {
       throw new Error(`No current drawings were returned for ${wp}. Check the work package's Documents list in SDx.`);
     }
-    const zip = new JSZip();
+    const zipFiles = Object.create(null);
     setStatus(`Finding attached PDFs for ${wp}…`);
     const fileMap = await resolveAttachedFiles(rows, token, config);
     const supersededIds = new Set(superseded.documents.map(row => clean(row.Id || row.OBID || row.id)));
@@ -1805,14 +1805,15 @@ var qrcode=function(){function i(t,r){function a(t,r){l=function(t){for(var r=ne
         name = `${name.slice(0, dot)}_${index + 1}.pdf`;
       }
       used.add(name.toLowerCase());
-      zip.file(name, stamped);
+      zipFiles[name] = stamped;
     }
     setStatus(`Creating controlled drawing list for ${wp}…`);
     const detailUrl = workPackageDetailUrl(workPackageIds.get(packageKey(wp, config)), config);
     const drawingList = await createControlledDrawingList(wp, pdfs, detailUrl);
-    zip.file(`${safeFilename(wp)}_Controlled_Drawing_List.pdf`, drawingList);
+    zipFiles[`${safeFilename(wp)}_Controlled_Drawing_List.pdf`] = drawingList;
     setStatus(`Building ZIP for ${wp}…`);
-    const blob = await zip.generateAsync({ type: 'blob', compression: 'DEFLATE', compressionOptions: { level: 5 } });
+    const zipBytes = fflate.zipSync(zipFiles, { level: 5 });
+    const blob = new Blob([zipBytes], { type: 'application/zip' });
     const url = URL.createObjectURL(blob);
     const anchor = document.createElement('a');
     anchor.href = url;

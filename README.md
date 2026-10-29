@@ -2,7 +2,7 @@
 
 A Tampermonkey userscript for SDx work packages (IWPs). It bulk creates IWPs from a CSV, associates drawing lists with existing IWPs, highlights packages with superseded documents, downloads stamped PDF drawings as ZIP files, and helps replace superseded document associations with current revisions.
 
-The current userscript version is **0.10.4**. The script is in [SDx-WP-Stamped-Drawings.user.js](SDx-WP-Stamped-Drawings.user.js).
+The current userscript version is **0.10.5**. The script is in [SDx-WP-Stamped-Drawings.user.js](SDx-WP-Stamped-Drawings.user.js).
 
 ## Install
 
@@ -10,7 +10,7 @@ The current userscript version is **0.10.4**. The script is in [SDx-WP-Stamped-D
 2. Open the [userscript installation link](https://raw.githubusercontent.com/atroedel-BMcD/SDx-IWP-Helper/main/SDx-WP-Stamped-Drawings.user.js) in that browser and choose **Install** in Tampermonkey. If the browser displays the source instead, create a new script in Tampermonkey, replace its contents with the file from this repository, and save it.
 3. Sign in to SDx and reload the page. On **Results: General Work Packages**, look for the blue **IWP TOOLS** button in the grid toolbar, near **Export All to Excel**.
 
-The script runs on matching `intergraphsmartcloud.com` pages. It requires access to the SDx session and loads `pdf-lib` and `JSZip` from cdnjs. The QR encoder is bundled with the userscript, so drawing-list QR generation does not require a third CDN library. If your browser or company network blocks `pdf-lib` or `JSZip`, stamping and ZIP creation will not work.
+The script runs on matching `intergraphsmartcloud.com` pages. It requires access to the SDx session and loads `pdf-lib` from cdnjs and `fflate` from jsDelivr. The QR encoder is bundled with the userscript, so drawing-list QR generation does not require a third CDN library. If your browser or company network blocks `pdf-lib` or `fflate`, stamping and ZIP creation will not work.
 
 ## Features
 
